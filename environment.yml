@@ -1,0 +1,16 @@
+name: SAE
+channels:
+  - nvidia
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pytorch==2.5.1 
+  - numpy=2.3.0
+  - tiktoken==0.11.0
+  - datasets ==4.2.0
+  - wandb==0.22.0
+  - pip
+  - pip:
+    - -e .
