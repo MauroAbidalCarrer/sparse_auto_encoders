@@ -1,4 +1,6 @@
+middle_layer_activations.pt
 # Byte-compiled / optimized / DLL files
+models/
 .vscode/*
 __pycache__/
 *.py[codz]
