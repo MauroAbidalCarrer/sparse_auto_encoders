@@ -48,8 +48,6 @@ else:
     raise ValueError("Unknown POOL_METHOD")
 
 X = X.numpy()  # convert to numpy for scaler, then back to tensor
-# scaler = StandardScaler()
-# X = scaler.fit_transform(X)     # zero-mean, unit-variance
 X = torch.from_numpy(X).float()
 
 # -------- Create dataset and splits --------
