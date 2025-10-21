@@ -3,9 +3,6 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
-# from sklearn.metrics import roc_auc_score
-# from sklearn.linear_model import LogisticRegression
-# from sklearn.preprocessing import StandardScaler
 
 # -------- USER: paths to your data files --------
 ACTIVATIONS_PATH = "middle_layer_activations.pt"  # shape: (N, seq_len, hidden_dim)
@@ -40,18 +37,6 @@ if activations.dim() != 3:
 N, seq_len, hidden_dim = activations.shape
 print(f"Loaded activations: N={N}, seq_len={seq_len}, hidden_dim={hidden_dim}")
 
-# Load labels if provided, otherwise create dummy labels for examples
-if os.path.exists(LABELS_PATH):
-    labels = np.load(LABELS_PATH)
-    assert labels.shape[0] == N
-else:
-    # fallback: if N==3 use small manual labels for your example prompts
-    if N == 3:
-        labels = np.array([0, 1, 0])  # mark second prompt (bomb) as unsafe
-        print("No labels file found; using fallback labels:", labels.tolist())
-    else:
-        raise FileNotFoundError("No labels file found. Please provide labels.npy matching activations.")
-
 # -------- Pool sequence tokens -> per-example vector --------
 if POOL_METHOD == "mean":
     X = activations.mean(dim=1)   # (N, hidden_dim)
@@ -66,13 +51,16 @@ X = X.numpy()  # convert to numpy for scaler, then back to tensor
 # scaler = StandardScaler()
 # X = scaler.fit_transform(X)     # zero-mean, unit-variance
 X = torch.from_numpy(X).float()
-y = torch.from_numpy(labels).long()
 
 # -------- Create dataset and splits --------
-dataset = TensorDataset(X, y)
+dataset = TensorDataset(X)
 n_train = int(len(dataset) * 0.8)
 n_val = len(dataset) - n_train
-train_ds, val_ds = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(42))
+train_ds, val_ds = random_split(
+    dataset,
+    [n_train, n_val],
+    generator=torch.Generator().manual_seed(42),
+)
 
 train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
@@ -124,7 +112,7 @@ best_val = float("inf")
 for epoch in range(1, EPOCHS + 1):
     model.train()
     train_loss = 0.0
-    for xb, yb in train_loader:
+    for (xb, ) in train_loader:
         xb = xb.to(DEVICE)
         recon, z = model(xb)
         loss_recon = mse_loss(recon, xb)
@@ -146,9 +134,8 @@ for epoch in range(1, EPOCHS + 1):
     model.eval()
     val_loss = 0.0
     zs_val = []
-    ys_val = []
     with torch.no_grad():
-        for xb, yb in val_loader:
+        for (xb, ) in val_loader:
             xb = xb.to(DEVICE)
             recon, z = model(xb)
             loss_recon = mse_loss(recon, xb)
@@ -157,10 +144,8 @@ for epoch in range(1, EPOCHS + 1):
             loss = loss_recon + LAMBDA_L1 * loss_l1 + LAMBDA_KL * loss_kl
             val_loss += loss.item() * xb.size(0)
             zs_val.append(z.cpu().numpy())
-            ys_val.append(yb.numpy())
 
     val_loss /= len(val_loader.dataset)
     zs_val = np.vstack(zs_val) if len(zs_val) else np.zeros((0, BOTTLE_DIM))
-    ys_val = np.concatenate(ys_val) if len(ys_val) else np.zeros((0,))
 
     print(f"Epoch {epoch:03d} | Train loss {train_loss:.6f} | Val loss {val_loss:.6f}")
