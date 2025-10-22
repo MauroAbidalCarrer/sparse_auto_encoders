@@ -15,8 +15,7 @@ df = (
 )
 tokenizer = AutoTokenizer.from_pretrained(model_id, legacy=False)
 questions = df["question"].tolist()
-# import code; code.interact(local=locals())
-# import sys; sys.exit()
+
 # Load model with GPU mapping
 model = AutoModelForCausalLM.from_pretrained(
     model_id,
@@ -33,28 +32,30 @@ middle_layer = num_layers // 2
 print(f"Model has {num_layers} transformer layers. Capturing activations after layer {middle_layer}.")
 
 # Define hook storage
-activations = {}
+activations = []
 
 def save_activation_hook(module: nn.Module, input: Tensor, output: Tensor):
-    import code; code.interact(local=locals())
-    print(output.shape)
     # Detach and move to CPU to avoid GPU OOM
-    activations["middle_layer"] = output[-1].detach().to("cpu")
+    activations.append(output[-1].detach().to("cpu"))
 
 # Register forward hook to middle transformer block
 handle = model.model.layers[middle_layer].register_forward_hook(save_activation_hook)
 
 # Tokenize batch with padding
-inputs = tokenizer(questions[:10], return_tensors="pt", padding=True, truncation=True).to(model.device)
+inputs = tokenizer(questions[], return_tensors="pt", padding=True, truncation=True).to(model.device)
+import code; code.interact(local=locals())
+BATCH_SIZE = 256
 # Generate outputs
 with torch.no_grad():
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=150,
-        do_sample=True,
-        temperature=0.7,
-        top_p=0.9
-    )
+    for i in range(0, len(inputs), BATCH_SIZE):
+        input = {k: v[i:i+BATCH_SIZE] for k, v in inputs.items()}
+        outputs = model.generate(
+            **input,
+            max_new_tokens=150,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9
+        )
 
 # Decode each output separately
 for i, output in enumerate(outputs):
@@ -65,12 +66,9 @@ for i, output in enumerate(outputs):
 handle.remove()
 
 # Inspect activations
-tensor = activations["middle_layer"]
-print(f"\nCaptured activation tensor shape: {tensor.shape}")
-
-# (batch_size, sequence_length, hidden_dim)
-# Example: torch.Size([3, 32, 4096])
+activations = torch.cat(activations)
+print(f"\nCaptured activation tensor shape: {activations.shape}")
 
 # Optional: save to disk
-torch.save(tensor, "middle_layer_activations.pt")
+torch.save(activations, "middle_layer_activations.pt")
 print("Activations saved to middle_layer_activations.pt")
