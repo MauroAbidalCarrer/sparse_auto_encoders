@@ -1,3 +1,5 @@
+from tqdm import tqdm
+
 import torch
 from torch import nn, Tensor
 from datasets import load_dataset
@@ -36,18 +38,19 @@ activations = []
 
 def save_activation_hook(module: nn.Module, input: Tensor, output: Tensor):
     # Detach and move to CPU to avoid GPU OOM
-    activations.append(output[-1].detach().to("cpu"))
+    output = output[-1].detach()
+    activations.append(output.reshape(-1, output.shape[-1]).to("cpu"))
+    # print(output.reshape(-1, output.shape[-1]).shape)
 
 # Register forward hook to middle transformer block
 handle = model.model.layers[middle_layer].register_forward_hook(save_activation_hook)
 
 # Tokenize batch with padding
-inputs = tokenizer(questions[], return_tensors="pt", padding=True, truncation=True).to(model.device)
-import code; code.interact(local=locals())
-BATCH_SIZE = 256
+inputs = tokenizer(questions, return_tensors="pt", padding=True, truncation=True).to(model.device)
+BATCH_SIZE = 64
 # Generate outputs
 with torch.no_grad():
-    for i in range(0, len(inputs), BATCH_SIZE):
+    for i in tqdm(range(0, len(questions), BATCH_SIZE), "geneating the activations"):
         input = {k: v[i:i+BATCH_SIZE] for k, v in inputs.items()}
         outputs = model.generate(
             **input,
@@ -60,7 +63,6 @@ with torch.no_grad():
 # Decode each output separately
 for i, output in enumerate(outputs):
     text = tokenizer.decode(output, skip_special_tokens=True)
-    # print(f"Prompt:", questions[i], "\nModel Output:", text, "\n=======")
 
 # Forward pass (no generation needed to get activations)
 handle.remove()
