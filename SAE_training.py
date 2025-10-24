@@ -15,14 +15,15 @@ os.makedirs(OUT_DIR, exist_ok=True)
 POOL_METHOD = "last"      # options: "mean", "last", "max"
 BOTTLE_DIM = 128
 HIDDEN_FACTOR = 0.5       # hidden_dim * factor -> first encoder hidden
-BATCH_SIZE = 64
+BATCH_SIZE = 256
 LR = 1e-3
 WEIGHT_DECAY = 1e-5
 EPOCHS = 50
 LAMBDA_L1 = 1e-4          # coefficient for L1 on latent
 LAMBDA_KL = 1e-2          # coefficient for KL sparsity
 RHO = 0.05                # target mean activation for KL sparsity
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("batch size:", BATCH_SIZE)
 
 # -------- Utility: load activations and labels --------
 activations = torch.load(ACTIVATIONS_PATH, weights_only=True)  # (N_TOKENS, EMBED_DIMS)
@@ -67,7 +68,7 @@ class SAE(nn.Module):
         reconstruction = self.decoder(saprse_activation)
         return reconstruction, saprse_activation
 
-model = SAE(model_embed_size=activations.shape[1], sparse_activation_expantion=8).to(DEVICE)
+model = SAE(model_embed_size=activations.shape[1], sparse_activation_expantion=8).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 mse_loss = nn.MSELoss(reduction="mean")
 
@@ -85,13 +86,14 @@ def kl_sparsity(z, rho, eps=1e-8):
     kl = rho_t * torch.log((rho_t + eps) / (p_hat + eps)) + (1 - rho_t) * torch.log(((1 - rho_t) + eps) / ((1 - p_hat) + eps))
     return kl.sum()
 
+torch.set_float32_matmul_precision('high')
 # -------- Training loop --------
 best_val = float("inf")
 for epoch in range(1, EPOCHS + 1):
     model.train()
     train_loss = 0.0
     for (xb, ) in tqdm(train_loader):
-        xb = xb.to(DEVICE)
+        xb = xb.to(device)
         reconstruction, sparse_activations = model(xb)
         loss_recon = mse_loss(reconstruction, xb)
 
@@ -114,7 +116,7 @@ for epoch in range(1, EPOCHS + 1):
     zs_val = []
     with torch.no_grad():
         for (xb, ) in val_loader:
-            xb = xb.to(DEVICE)
+            xb = xb.to(device)
             reconstruction, sparse_activations = model(xb)
             loss_recon = mse_loss(reconstruction, xb)
             loss_l1 = sparse_activations.abs().mean()
