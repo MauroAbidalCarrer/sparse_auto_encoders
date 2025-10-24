@@ -61,11 +61,11 @@ class SAE(nn.Module):
             # nn.Linear(sparse_activations_size // 2, sparse_activations_size),
             # nn.ReLU(inplace=True)
             nn.Linear(model_embed_size, sparse_activations_size),
-            nn.Sigmoid(),
+            nn.ReLU(),
         )
         self.decoder = nn.Sequential(
             nn.Linear(sparse_activations_size, model_embed_size),
-            nn.Tanh(),
+            # nn.Tanh(),
             # nn.ReLU(inplace=True),
             # nn.Linear(sparse_activations_size, model_embed_size)
         )
@@ -134,7 +134,7 @@ for epoch in range(1, EPOCHS + 1):
             loss_l1 = sparse_activations.abs().mean()  # alternative: z.abs().mean() (L1 on activations)
             loss_kl = kl_sparsity(sparse_activations, RHO)
 
-            loss = loss_recon + LAMBDA_L1 * loss_l1 + LAMBDA_KL * loss_kl
+            loss = loss_recon + LAMBDA_L1 * loss_l1 #+ LAMBDA_KL * loss_kl
 
         optimizer.zero_grad()
         loss.backward()
@@ -155,7 +155,7 @@ for epoch in range(1, EPOCHS + 1):
             loss_recon = mse_loss(reconstruction, xb)
             loss_l1 = sparse_activations.abs().mean()
             loss_kl = kl_sparsity(sparse_activations, RHO)
-            loss = loss_recon + LAMBDA_L1 * loss_l1 + LAMBDA_KL * loss_kl
+            loss = loss_recon + LAMBDA_L1 * loss_l1 #+ LAMBDA_KL * loss_kl
             val_loss += loss.item() * xb.size(0)
             zs_val.append(sparse_activations.cpu().numpy())
 
