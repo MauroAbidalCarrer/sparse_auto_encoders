@@ -1,5 +1,7 @@
 import os
 from tqdm import tqdm
+from functools import partial
+from contextlib import nullcontext
 
 import torch
 import numpy as np
@@ -87,6 +89,25 @@ def kl_sparsity(z, rho, eps=1e-8):
     return kl.sum()
 
 torch.set_float32_matmul_precision('high')
+def can_use_bfloat16(device: torch.device) -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        # get capability for current device index
+        major, minor = torch.cuda.get_device_capability(device.index)
+    except Exception:
+        major, minor = torch.cuda.get_device_capability()
+    # Ampere (sm_80) and newer support efficient bfloat16
+    return major >= 8
+
+USE_BFLOAT16 = can_use_bfloat16(device)
+print("USE_BFLOAT16 autocast:", USE_BFLOAT16)
+# autocast context factory (nullcontext if not available)
+if USE_BFLOAT16:
+    autocast_ctx = partial(torch.autocast, device_type=device.type, dtype=torch.bfloat16)
+else:
+    autocast_ctx = nullcontext
+
 # -------- Training loop --------
 best_val = float("inf")
 for epoch in range(1, EPOCHS + 1):
@@ -94,13 +115,14 @@ for epoch in range(1, EPOCHS + 1):
     train_loss = 0.0
     for (xb, ) in tqdm(train_loader):
         xb = xb.to(device)
-        reconstruction, sparse_activations = model(xb)
-        loss_recon = mse_loss(reconstruction, xb)
+        with autocast_ctx():
+            reconstruction, sparse_activations = model(xb)
+            loss_recon = mse_loss(reconstruction, xb)
 
-        loss_l1 = sparse_activations.abs().mean()  # alternative: z.abs().mean() (L1 on activations)
-        loss_kl = kl_sparsity(sparse_activations, RHO)
+            loss_l1 = sparse_activations.abs().mean()  # alternative: z.abs().mean() (L1 on activations)
+            loss_kl = kl_sparsity(sparse_activations, RHO)
 
-        loss = loss_recon + LAMBDA_L1 * loss_l1 + LAMBDA_KL * loss_kl
+            loss = loss_recon + LAMBDA_L1 * loss_l1 + LAMBDA_KL * loss_kl
 
         optimizer.zero_grad()
         loss.backward()
