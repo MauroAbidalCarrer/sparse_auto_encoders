@@ -58,8 +58,8 @@ class ActivationsRecorder:
         assert tokens_tensor.shape[0] == activations_tensor.shape[0], "Number of tokens must equal number of activations"
         # Save
         os.makedirs("dataset", exist_ok=True)
-        torch.save(activations_tensor, "dataset/middle_layer_activations_no_pad.pt")
-        torch.save(tokens_tensor, "dataset/middle_layer_tokens_no_pad.pt")
+        torch.save(activations_tensor, "dataset/middle_layer_activations.pt")
+        torch.save(tokens_tensor, "dataset/middle_layer_tokens.pt")
         print("Saved activations and tokens (padding removed).")
 
 def main():
