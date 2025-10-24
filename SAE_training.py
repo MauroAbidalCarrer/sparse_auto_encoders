@@ -1,12 +1,13 @@
 import os
-import numpy as np
+from tqdm import tqdm
+
 import torch
+import numpy as np
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 # -------- USER: paths to your data files --------
-ACTIVATIONS_PATH = "middle_layer_activations.pt"  # shape: (N, seq_len, hidden_dim)
-LABELS_PATH = "labels.npy"                        # shape: (N,) with 0/1 labels (optional)
+ACTIVATIONS_PATH = "dataset/middle_layer_activations.pt"  # shape: (N, seq_len, hidden_dim)
 OUT_DIR = "sae_output"
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -24,34 +25,14 @@ RHO = 0.05                # target mean activation for KL sparsity
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # -------- Utility: load activations and labels --------
-if not os.path.exists(ACTIVATIONS_PATH):
-    raise FileNotFoundError(f"Activation tensor not found at {ACTIVATIONS_PATH}")
-
-activations = torch.load(ACTIVATIONS_PATH, weights_only=True)  # expected torch.Tensor
+activations = torch.load(ACTIVATIONS_PATH, weights_only=True)  # (N_TOKENS, EMBED_DIMS)
 # ensure float32
 activations = activations.float()
 
-if activations.dim() != 3:
-    raise ValueError("Expected activations shape (N, seq_len, hidden_dim)")
-
-N, seq_len, hidden_dim = activations.shape
-print(f"Loaded activations: N={N}, seq_len={seq_len}, hidden_dim={hidden_dim}")
-
-# -------- Pool sequence tokens -> per-example vector --------
-if POOL_METHOD == "mean":
-    X = activations.mean(dim=1)   # (N, hidden_dim)
-elif POOL_METHOD == "max":
-    X, _ = activations.max(dim=1)
-elif POOL_METHOD == "last":
-    X = activations[:, -1, :]
-else:
-    raise ValueError("Unknown POOL_METHOD")
-
-X = X.numpy()  # convert to numpy for scaler, then back to tensor
-X = torch.from_numpy(X).float()
+print(f"Loaded activations, shape:", activations.shape)
 
 # -------- Create dataset and splits --------
-dataset = TensorDataset(X)
+dataset = TensorDataset(activations)
 n_train = int(len(dataset) * 0.8)
 n_val = len(dataset) - n_train
 train_ds, val_ds = random_split(
@@ -65,35 +46,34 @@ val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
 
 # -------- Model: simple SAE --------
 class SAE(nn.Module):
-    def __init__(self, input_dim, bottle_dim, hidden_factor=0.5):
+    def __init__(self, model_embed_size: int, sparse_activation_expantion: int):
         super().__init__()
-        hid = max(4, int(input_dim * hidden_factor))
+        sparse_activations_size = model_embed_size * sparse_activation_expantion
         self.encoder = nn.Sequential(
-            nn.LayerNorm(input_dim),
-            nn.Linear(input_dim, hid),
+            # nn.LayerNorm(model_embed_size),
+            nn.Linear(model_embed_size, sparse_activations_size),
             nn.ReLU(inplace=True),
-            nn.Linear(hid, bottle_dim),
+            nn.Linear(sparse_activations_size, sparse_activations_size),
             nn.ReLU(inplace=True)
         )
         self.decoder = nn.Sequential(
-            nn.Linear(bottle_dim, hid),
+            nn.Linear(sparse_activations_size, sparse_activations_size),
             nn.ReLU(inplace=True),
-            nn.Linear(hid, input_dim)
+            nn.Linear(sparse_activations_size, model_embed_size)
         )
 
     def forward(self, x):
-        z = self.encoder(x)  # (B, bottle_dim), non-negative due to ReLU
-        recon = self.decoder(z)
-        return recon, z
+        saprse_activation = self.encoder(x)  # (B, bottle_dim), non-negative due to ReLU
+        reconstruction = self.decoder(saprse_activation)
+        return reconstruction, saprse_activation
 
-model = SAE(input_dim=hidden_dim, bottle_dim=BOTTLE_DIM, hidden_factor=HIDDEN_FACTOR).to(DEVICE)
+model = SAE(model_embed_size=activations.shape[1], sparse_activation_expantion=8).to(DEVICE)
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 mse_loss = nn.MSELoss(reduction="mean")
 
 # -------- Sparsity helper: KL divergence for Bernoulli-like activations --------
 # We treat activations as >=0 (ReLU). We compute mean activation per hidden unit across batch,
 # normalize by (max activation) to get pseudo-probabilities. Simpler approach: use mean(z) directly.
-
 def kl_sparsity(z, rho, eps=1e-8):
     # z: (B, D) non-negative; convert to mean activation per-unit (averaged across batch)
     # Scale to [0,1] by dividing by (mean + small constant) OR use sigmoid. Here we use sigmoid to map to (0,1).
@@ -110,13 +90,13 @@ best_val = float("inf")
 for epoch in range(1, EPOCHS + 1):
     model.train()
     train_loss = 0.0
-    for (xb, ) in train_loader:
+    for (xb, ) in tqdm(train_loader):
         xb = xb.to(DEVICE)
-        recon, z = model(xb)
-        loss_recon = mse_loss(recon, xb)
+        reconstruction, sparse_activations = model(xb)
+        loss_recon = mse_loss(reconstruction, xb)
 
-        loss_l1 = z.abs().mean()  # alternative: z.abs().mean() (L1 on activations)
-        loss_kl = kl_sparsity(z, RHO)
+        loss_l1 = sparse_activations.abs().mean()  # alternative: z.abs().mean() (L1 on activations)
+        loss_kl = kl_sparsity(sparse_activations, RHO)
 
         loss = loss_recon + LAMBDA_L1 * loss_l1 + LAMBDA_KL * loss_kl
 
@@ -135,13 +115,13 @@ for epoch in range(1, EPOCHS + 1):
     with torch.no_grad():
         for (xb, ) in val_loader:
             xb = xb.to(DEVICE)
-            recon, z = model(xb)
-            loss_recon = mse_loss(recon, xb)
-            loss_l1 = z.abs().mean()
-            loss_kl = kl_sparsity(z, RHO)
+            reconstruction, sparse_activations = model(xb)
+            loss_recon = mse_loss(reconstruction, xb)
+            loss_l1 = sparse_activations.abs().mean()
+            loss_kl = kl_sparsity(sparse_activations, RHO)
             loss = loss_recon + LAMBDA_L1 * loss_l1 + LAMBDA_KL * loss_kl
             val_loss += loss.item() * xb.size(0)
-            zs_val.append(z.cpu().numpy())
+            zs_val.append(sparse_activations.cpu().numpy())
 
     val_loss /= len(val_loader.dataset)
     zs_val = np.vstack(zs_val) if len(zs_val) else np.zeros((0, BOTTLE_DIM))
