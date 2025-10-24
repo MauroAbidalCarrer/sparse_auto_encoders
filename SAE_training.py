@@ -60,7 +60,7 @@ class SAE(nn.Module):
             # nn.ReLU(inplace=True)
         )
         self.decoder = nn.Sequential(
-            nn.Linear(sparse_activations_size, sparse_activations_size),
+            nn.Linear(sparse_activations_size, model_embed_size),
             nn.ReLU(inplace=True),
             # nn.Linear(sparse_activations_size, model_embed_size)
         )
