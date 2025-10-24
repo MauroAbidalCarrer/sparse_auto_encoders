@@ -29,11 +29,11 @@ class ActivationsRecorder:
 
     def save_activation_hook(self, module: nn.Module, inp, outp):
         """
-        outp can be a single tensor or tuple; the hidden states are typically outp[0].
+        inp can be a single tensor or tuple; the hidden states are typically inp[0].
         We assume hidden_states shape = (batch, seq_len, hidden_dim).
         """
         # Get hidden states tensor robustly:
-        hidden_states = outp[0] if isinstance(outp, (tuple, list)) else outp
+        hidden_states = inp[0] if isinstance(inp, (tuple, list)) else inp
         # Move to CPU and detach
         hidden_states = hidden_states.detach().cpu()  # (B, S, H)
 
