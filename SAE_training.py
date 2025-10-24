@@ -49,19 +49,24 @@ val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
 
 # -------- Model: simple SAE --------
 class SAE(nn.Module):
-    def __init__(self, model_embed_size: int, sparse_activation_expantion: int):
+    def __init__(self, model_embed_size: int, sparse_activation_expantion: int, dropout_ratio: float):
         super().__init__()
         sparse_activations_size = model_embed_size * sparse_activation_expantion
         self.encoder = nn.Sequential(
-            nn.LayerNorm(model_embed_size),
-            nn.Linear(model_embed_size, sparse_activations_size),
-            nn.ReLU(inplace=True),
-            # nn.Linear(sparse_activations_size, sparse_activations_size),
+            # nn.LayerNorm(model_embed_size),
+            # nn.Dropout(dropout_ratio),
+            # nn.Linear(model_embed_size, sparse_activations_size // 2),
+            # nn.Dropout(dropout_ratio),
+            # nn.ReLU(inplace=True),
+            # nn.Linear(sparse_activations_size // 2, sparse_activations_size),
             # nn.ReLU(inplace=True)
+            nn.Linear(model_embed_size, sparse_activations_size),
+            nn.Sigmoid(),
         )
         self.decoder = nn.Sequential(
             nn.Linear(sparse_activations_size, model_embed_size),
-            nn.ReLU(inplace=True),
+            nn.Tanh(),
+            # nn.ReLU(inplace=True),
             # nn.Linear(sparse_activations_size, model_embed_size)
         )
 
@@ -73,7 +78,8 @@ class SAE(nn.Module):
 model = torch.compile(
     SAE(
         model_embed_size=activations.shape[1],
-        sparse_activation_expantion=8
+        sparse_activation_expantion=8,
+        dropout_ratio=0.2,
     )
     .to(device)
 )
@@ -128,7 +134,7 @@ for epoch in range(1, EPOCHS + 1):
             loss_l1 = sparse_activations.abs().mean()  # alternative: z.abs().mean() (L1 on activations)
             loss_kl = kl_sparsity(sparse_activations, RHO)
 
-            loss = loss_recon #+ LAMBDA_L1 * loss_l1 + LAMBDA_KL * loss_kl
+            loss = loss_recon + LAMBDA_L1 * loss_l1 + LAMBDA_KL * loss_kl
 
         optimizer.zero_grad()
         loss.backward()
