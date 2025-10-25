@@ -5,6 +5,7 @@ from contextlib import nullcontext
 
 import torch
 import numpy as np
+import pandas as pd
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
@@ -22,13 +23,11 @@ LR = 1e-3
 WEIGHT_DECAY = 1e-5
 EPOCHS = 3
 LAMBDA_L1 = 1e-4          # coefficient for L1 on latent
-LAMBDA_KL = 1e-2          # coefficient for KL sparsity
-RHO = 0.05                # target mean activation for KL sparsity
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("batch size:", BATCH_SIZE)
 
 # -------- Utility: load activations and labels --------
-activations = torch.load(ACTIVATIONS_PATH, weights_only=True)  # (N_TOKENS, EMBED_DIMS)
+activations: torch.Tensor = torch.load(ACTIVATIONS_PATH, weights_only=True)  # (N_TOKENS, EMBED_DIMS)
 # ensure float32
 activations = activations.float()
 
@@ -53,13 +52,6 @@ class SAE(nn.Module):
         super().__init__()
         sparse_activations_size = model_embed_size * sparse_activation_expantion
         self.encoder = nn.Sequential(
-            # nn.LayerNorm(model_embed_size),
-            # nn.Dropout(dropout_ratio),
-            # nn.Linear(model_embed_size, sparse_activations_size // 2),
-            # nn.Dropout(dropout_ratio),
-            # nn.ReLU(inplace=True),
-            # nn.Linear(sparse_activations_size // 2, sparse_activations_size),
-            # nn.ReLU(inplace=True)
             nn.Linear(model_embed_size, sparse_activations_size),
             nn.ReLU(),
         )
@@ -86,19 +78,6 @@ model = torch.compile(
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 mse_loss = nn.MSELoss(reduction="mean")
 
-# -------- Sparsity helper: KL divergence for Bernoulli-like activations --------
-# We treat activations as >=0 (ReLU). We compute mean activation per hidden unit across batch,
-# normalize by (max activation) to get pseudo-probabilities. Simpler approach: use mean(z) directly.
-def kl_sparsity(z, rho, eps=1e-8):
-    # z: (B, D) non-negative; convert to mean activation per-unit (averaged across batch)
-    # Scale to [0,1] by dividing by (mean + small constant) OR use sigmoid. Here we use sigmoid to map to (0,1).
-    p_hat = torch.clamp(z.mean(dim=0), eps, 1.0 - eps)  # mean activation per unit
-    # Map p_hat to (0,1) range by using a running scaling factor. If p_hat >1, scale with sigmoid:
-    p_hat = torch.sigmoid(p_hat)  
-    rho_t = torch.tensor(rho, device=z.device)
-    # KL divergence between Bernoulli(rho) and Bernoulli(p_hat)
-    kl = rho_t * torch.log((rho_t + eps) / (p_hat + eps)) + (1 - rho_t) * torch.log(((1 - rho_t) + eps) / ((1 - p_hat) + eps))
-    return kl.sum()
 
 torch.set_float32_matmul_precision('high')
 def can_use_bfloat16(device: torch.device) -> bool:
@@ -121,6 +100,48 @@ else:
     autocast_ctx = nullcontext
 
 # -------- Training loop --------
+def eval_model(model: nn.Module):
+    model.eval()
+    val_loss = 0.0
+    zs_val = []
+    with torch.no_grad():
+        for (xb, ) in val_loader:
+            xb = xb.to(device)
+            reconstruction, sparse_activations = model(xb)
+            loss_recon = mse_loss(reconstruction, xb)
+            loss_l1 = sparse_activations.abs().mean()
+            loss = loss_recon + LAMBDA_L1 * loss_l1
+            val_loss += loss.item() * xb.size(0)
+            zs_val.append(sparse_activations.cpu().numpy())
+
+    val_loss /= len(val_loader.dataset)
+    zs_val = np.vstack(zs_val) if len(zs_val) else np.zeros((0, BOTTLE_DIM))
+
+    print(f"Epoch {epoch:03d} | Train loss {train_loss:.6f} | Val loss {val_loss:.6f}")
+    
+def classify_category_from_sae_features(sae: nn.Module):
+    meta_df = pd.read_parquet("dataset/token_metadata.parquet")
+    meta_df["token_idx"] = np.arange(len(meta_df))
+    meta_df = meta_df.query("subcategory.notna()")
+    targets = torch.from_numpy(pd.get_dummies(meta_df["subcategory"]).values)
+    cls_model = nn.LazyLinear(targets.shape[1]).to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adadelta(cls_model.parameters())
+    cls_dataset = TensorDataset(
+        activations[meta_df["token_idx"]],
+        targets,
+    )
+    data_loader = DataLoader(cls_dataset, BATCH_SIZE)
+    for epoch in range(2):
+        for x, y in data_loader:
+            x, y = x.to(device), y.to(device)
+            optimizer.zero_grad()
+            logits = cls_model(x)
+            loss = criterion(logits, y)
+            loss.backward()
+            optimizer.step()
+    activations[meta_df]
+    
 best_val = float("inf")
 for epoch in range(1, EPOCHS + 1):
     model.train()
@@ -131,10 +152,8 @@ for epoch in range(1, EPOCHS + 1):
             reconstruction, sparse_activations = model(xb)
             loss_recon = mse_loss(reconstruction, xb)
 
-            loss_l1 = sparse_activations.abs().mean()  # alternative: z.abs().mean() (L1 on activations)
-            loss_kl = kl_sparsity(sparse_activations, RHO)
-
-            loss = loss_recon + LAMBDA_L1 * loss_l1 #+ LAMBDA_KL * loss_kl
+            loss_l1 = sparse_activations.abs().mean()
+            loss = loss_recon + LAMBDA_L1 * loss_l1
 
         optimizer.zero_grad()
         loss.backward()
@@ -143,23 +162,4 @@ for epoch in range(1, EPOCHS + 1):
         train_loss += loss.item() * xb.size(0)
 
     train_loss /= len(train_loader.dataset)
-
-    # Validation
-    model.eval()
-    val_loss = 0.0
-    zs_val = []
-    with torch.no_grad():
-        for (xb, ) in val_loader:
-            xb = xb.to(device)
-            reconstruction, sparse_activations = model(xb)
-            loss_recon = mse_loss(reconstruction, xb)
-            loss_l1 = sparse_activations.abs().mean()
-            loss_kl = kl_sparsity(sparse_activations, RHO)
-            loss = loss_recon + LAMBDA_L1 * loss_l1 #+ LAMBDA_KL * loss_kl
-            val_loss += loss.item() * xb.size(0)
-            zs_val.append(sparse_activations.cpu().numpy())
-
-    val_loss /= len(val_loader.dataset)
-    zs_val = np.vstack(zs_val) if len(zs_val) else np.zeros((0, BOTTLE_DIM))
-
-    print(f"Epoch {epoch:03d} | Train loss {train_loss:.6f} | Val loss {val_loss:.6f}")
+    eval_model(model)
