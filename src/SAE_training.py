@@ -168,7 +168,7 @@ def classify_category_from_sae_features(sae: nn.Module):
     )
     train_dl = DataLoader(train_ds, BATCH_SIZE)
     val_dl = DataLoader(val_ds, BATCH_SIZE)
-    for epoch in range(4):
+    for epoch in range(8):
         train_loss = 0
         train_accuracy = 0
         cls_model.train()
