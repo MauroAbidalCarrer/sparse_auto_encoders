@@ -46,10 +46,11 @@ train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
 
 # -------- Model: simple SAE --------
-class SAE(nn.Module):
+class SparseAutoEncoder(nn.Module):
     def __init__(self, model_embed_size: int, sparse_activation_expantion: int, dropout_ratio: float):
         super().__init__()
         sparse_activations_size = model_embed_size * sparse_activation_expantion
+        print("sparse_activations_size", sparse_activations_size)
         self.encoder = nn.Sequential(
             nn.Linear(model_embed_size, sparse_activations_size),
             nn.ReLU(),
@@ -63,7 +64,7 @@ class SAE(nn.Module):
         reconstruction = self.decoder(saprse_activation)
         return reconstruction, saprse_activation
 
-sae = SAE(
+sae = SparseAutoEncoder(
     model_embed_size=activations.shape[1],
     sparse_activation_expantion=8,
     dropout_ratio=0.2,
@@ -128,17 +129,13 @@ def eval_model(model: nn.Module, epoch: int, train_loss: float):
             loss = loss_recon + LAMBDA_L1 * loss_l1
             val_loss += loss.item() * x.size(0)
             zs_val.append(sparse_activations.cpu().numpy())
-            batch_l0_norm_loss = (sparse_activations != 0).sum().item()
+            batch_l0_norm_loss = (sparse_activations != 0).float().mean().item()
             l0_norm_loss = batch_l0_norm_loss * x.shape[0]
 
     val_loss /= len(val_loader.dataset)
     zs_val = np.vstack(zs_val) if len(zs_val) else np.zeros((0, BOTTLE_DIM))
     print(f"Epoch {epoch} | Train loss {train_loss:.3f} | Val loss {val_loss:.3f} | l0_norm_loss {l0_norm_loss:.3f}")
     classify_category_from_sae_features(model)
-
-def set_require_grad(module: nn.Module, value: bool):
-    for param in module.parameters():
-        param.requires_grad = value
     
 class TokenQuestionClassifier(nn.Module):
     def __init__(self, sae: nn.Module, n_targets: int):
@@ -152,7 +149,6 @@ class TokenQuestionClassifier(nn.Module):
         )
     
     def forward(self, activations: Tensor) -> Tensor:
-        # with torch.no_grad():
         _, sae_features = self.sae(activations)
         return self.clssifier(sae_features)
     
@@ -174,15 +170,24 @@ def classify_category_from_sae_features(sae: nn.Module):
     val_dl = DataLoader(val_ds, BATCH_SIZE)
     for epoch in range(4):
         train_loss = 0
+        train_accuracy = 0
         cls_model.train()
         for x, y in train_dl:
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
-            logits = cls_model(x)
-            batch_loss = criterion(logits, y)
+            y_pred = cls_model(x)
+            batch_loss = criterion(y_pred, y)
             batch_loss.backward()
             optimizer.step()
-            train_loss += batch_loss.item() * x.size(0) / len(train_loader.dataset)
+            train_loss += batch_loss.item() * x.shape[0] / len(train_loader.dataset)
+            batch_accuracy = (
+                (y_pred.max(dim=1).indices == y.max(dim=1).indices)
+                .float()
+                .mean()
+                .item()
+            )
+            train_accuracy += batch_accuracy * x.shape[0] / len(train_loader.dataset)
+
         cls_model.eval()
         # Validation
         val_loss = 0
@@ -200,8 +205,12 @@ def classify_category_from_sae_features(sae: nn.Module):
                     .item()
                 )
                 val_accuracy += batch_accuracy * x.size(0) / len(train_loader.dataset)
-        print(f"epoch {epoch}, train loss {train_loss:.3f}, val loss {val_loss:.3f}, val accuracy {val_accuracy:.3f}")
+        print(f"epoch {epoch}, train loss {train_loss:.3f}, train_accuracy {train_accuracy:.3f}, val loss {val_loss:.3f}, val accuracy {val_accuracy:.3f}")
     set_require_grad(sae, True)
+
+def set_require_grad(module: nn.Module, value: bool):
+    for param in module.parameters():
+        param.requires_grad = value
 
 def mk_token_category_dataset() -> TensorDataset:
     meta_df = pd.read_parquet("dataset/token_metadata.parquet")
