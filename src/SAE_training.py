@@ -144,28 +144,25 @@ class TokenQuestionClassifier(nn.Module):
     def __init__(self, sae: nn.Module, n_targets: int):
         super().__init__()
         self.sae = sae
-        self.linear = nn.LazyLinear(n_targets)
+        self.clssifier = nn.Sequential(
+            nn.LazyBatchNorm1d(),
+            nn.LazyLinear(256),
+            nn.LazyBatchNorm1d(),
+            nn.LazyLinear(n_targets),
+        )
     
     def forward(self, activations: Tensor) -> Tensor:
         # with torch.no_grad():
         _, sae_features = self.sae(activations)
-        return self.linear(sae_features)
+        return self.clssifier(sae_features)
     
 def classify_category_from_sae_features(sae: nn.Module):
     set_require_grad(sae, False)
-    meta_df = pd.read_parquet("dataset/token_metadata.parquet")
-    meta_df["token_idx"] = np.arange(len(meta_df))
-    meta_df = meta_df.query("subcategory.notna() & token_pos >= 10")
-
-    targets = pd.get_dummies(meta_df["subcategory"]).astype("float").values
-    targets = torch.from_numpy(targets)
-    cls_model = TokenQuestionClassifier(sae, targets.shape[1]).to(device)
+    cls_dataset = mk_token_category_dataset()
+    n_targets = cls_dataset.tensors[1].shape[1]
+    cls_model = TokenQuestionClassifier(sae, n_targets).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adadelta(cls_model.parameters())
-    cls_dataset = TensorDataset(
-        activations[meta_df["token_idx"].values],
-        targets,
-    )
     n_train = int(len(cls_dataset) * 0.8)
     n_val = len(cls_dataset) - n_train
     train_ds, val_ds = random_split(
@@ -206,7 +203,16 @@ def classify_category_from_sae_features(sae: nn.Module):
         print(f"epoch {epoch}, train loss {train_loss:.3f}, val loss {val_loss:.3f}, val accuracy {val_accuracy:.3f}")
     set_require_grad(sae, True)
 
-# def mk_token_category_dataset() -> TensorDataset:
+def mk_token_category_dataset() -> TensorDataset:
+    meta_df = pd.read_parquet("dataset/token_metadata.parquet")
+    meta_df["token_idx"] = np.arange(len(meta_df))
+    meta_df = meta_df.query("subcategory.notna() & token_pos >= 10")
+    targets = pd.get_dummies(meta_df["subcategory"]).astype("float").values
+    targets = torch.from_numpy(targets)
+    return TensorDataset(
+        activations[meta_df["token_idx"].values],
+        targets,
+    )
 
 if __name__ == "__main__":
     train_sae(sae)
