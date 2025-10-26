@@ -10,6 +10,7 @@ from torch import nn
 from torch import Tensor
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
+
 # -------- USER: paths to your data files --------
 ACTIVATIONS_PATH = "dataset/middle_layer_activations.pt"  # shape: (N, seq_len, hidden_dim)
 OUT_DIR = "sae_output"
@@ -29,7 +30,6 @@ print("batch size:", BATCH_SIZE)
 
 # -------- Utility: load activations and labels --------
 activations: torch.Tensor = torch.load(ACTIVATIONS_PATH, weights_only=True)  # (N_TOKENS, EMBED_DIMS)
-# ensure float32
 activations = activations.float()
 
 print(f"Loaded activations, shape:", activations.shape)
@@ -189,14 +189,11 @@ for epoch in range(1, EPOCHS + 1):
         with autocast_ctx():
             reconstruction, sparse_activations = sae(xb)
             loss_recon = mse_loss(reconstruction, xb)
-
             loss_l1 = sparse_activations.abs().mean()
             loss = loss_recon + LAMBDA_L1 * loss_l1
-
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-
         train_loss += loss.item() * xb.size(0)
 
     train_loss /= len(train_loader.dataset)
