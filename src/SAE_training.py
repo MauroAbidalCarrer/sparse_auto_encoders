@@ -7,6 +7,7 @@ import torch
 import numpy as np
 import pandas as pd
 from torch import nn
+from torch import Tensor
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 # -------- USER: paths to your data files --------
@@ -57,9 +58,6 @@ class SAE(nn.Module):
         )
         self.decoder = nn.Sequential(
             nn.Linear(sparse_activations_size, model_embed_size),
-            # nn.Tanh(),
-            # nn.ReLU(inplace=True),
-            # nn.Linear(sparse_activations_size, model_embed_size)
         )
 
     def forward(self, x):
@@ -67,15 +65,13 @@ class SAE(nn.Module):
         reconstruction = self.decoder(saprse_activation)
         return reconstruction, saprse_activation
 
-model = torch.compile(
-    SAE(
+sae = SAE(
         model_embed_size=activations.shape[1],
         sparse_activation_expantion=8,
         dropout_ratio=0.2,
-    )
-    .to(device)
-)
-optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    ).to(device)
+# sae = torch.compile(sae)
+optimizer = torch.optim.AdamW(sae.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 mse_loss = nn.MSELoss(reduction="mean")
 
 
@@ -100,7 +96,7 @@ else:
     autocast_ctx = nullcontext
 
 # -------- Training loop --------
-def eval_model(model: nn.Module):
+def eval_model(model: nn.Module, epoch: int, train_loss: float):
     model.eval()
     val_loss = 0.0
     zs_val = []
@@ -118,38 +114,80 @@ def eval_model(model: nn.Module):
     zs_val = np.vstack(zs_val) if len(zs_val) else np.zeros((0, BOTTLE_DIM))
 
     print(f"Epoch {epoch:03d} | Train loss {train_loss:.6f} | Val loss {val_loss:.6f}")
+    classify_category_from_sae_features(model)
+
+def set_require_grad(module: nn.Module, value: bool):
+    for param in module.parameters():
+        param.requires_grad = value
+    
+class TokenQuestionClassifier(nn.Module):
+    def __init__(self, sae: nn.Module, n_targets: int):
+        super().__init__()
+        self.sae = sae
+        self.linear = nn.LazyLinear(n_targets)
+    
+    def forward(self, activations: Tensor) -> Tensor:
+        # with torch.no_grad():
+        _, sae_features = self.sae(activations)
+        return self.linear(sae_features)
     
 def classify_category_from_sae_features(sae: nn.Module):
+    set_require_grad(sae, False)
     meta_df = pd.read_parquet("dataset/token_metadata.parquet")
     meta_df["token_idx"] = np.arange(len(meta_df))
     meta_df = meta_df.query("subcategory.notna()")
-    targets = torch.from_numpy(pd.get_dummies(meta_df["subcategory"]).values)
-    cls_model = nn.LazyLinear(targets.shape[1]).to(device)
+    targets = pd.get_dummies(meta_df["subcategory"]).astype("float").values
+    targets = torch.from_numpy(targets)
+    cls_model = TokenQuestionClassifier(sae, targets.shape[1]).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adadelta(cls_model.parameters())
     cls_dataset = TensorDataset(
         activations[meta_df["token_idx"]],
         targets,
     )
-    data_loader = DataLoader(cls_dataset, BATCH_SIZE)
+    n_train = int(len(cls_dataset) * 0.8)
+    n_val = len(cls_dataset) - n_train
+    train_ds, val_ds = random_split(
+        cls_dataset, 
+        [n_train, n_val],
+        generator=torch.Generator().manual_seed(42),
+    )
+    train_dl = DataLoader(train_ds, BATCH_SIZE)
+    val_dl = DataLoader(val_ds, BATCH_SIZE)
     for epoch in range(2):
-        for x, y in data_loader:
+        train_loss = 0
+        cls_model.train()
+        for x, y in train_dl:
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
             logits = cls_model(x)
-            loss = criterion(logits, y)
-            loss.backward()
+            batch_loss = criterion(logits, y)
+            batch_loss.backward()
             optimizer.step()
-    activations[meta_df]
-    
-best_val = float("inf")
+            train_loss += batch_loss.item() * x.size(0) / len(train_loader.dataset)
+        cls_model.eval()
+        # Validation
+        val_loss = 0
+        val_accuracy = 0
+        with torch.no_grad():
+            for x, y in val_dl:
+                x, y = x.to(device), y.to(device)
+                y_pred: Tensor = cls_model(x)
+                batch_loss = criterion(y_pred, y)
+                val_loss += batch_loss.item() * x.size(0) / len(train_loader.dataset)
+                batch_accuracy = (y_pred.max(dim=1).indices == y.max(dim=1).indices).mean()
+                val_accuracy += batch_accuracy.item() * x.size(0) / len(train_loader.dataset)
+        print(f"epoch {epoch}, train loss {train_loss}, val loss {val_loss}, val accuracy {val_accuracy}")
+    set_require_grad(sae, True)
+
+eval_model(sae, 0, 0)
 for epoch in range(1, EPOCHS + 1):
-    model.train()
+    sae.train()
     train_loss = 0.0
     for (xb, ) in tqdm(train_loader):
         xb = xb.to(device)
         with autocast_ctx():
-            reconstruction, sparse_activations = model(xb)
+            reconstruction, sparse_activations = sae(xb)
             loss_recon = mse_loss(reconstruction, xb)
 
             loss_l1 = sparse_activations.abs().mean()
@@ -162,4 +200,4 @@ for epoch in range(1, EPOCHS + 1):
         train_loss += loss.item() * xb.size(0)
 
     train_loss /= len(train_loader.dataset)
-    eval_model(model)
+    eval_model(sae, epoch, train_loss)
