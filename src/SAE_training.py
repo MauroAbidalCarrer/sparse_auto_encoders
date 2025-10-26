@@ -23,7 +23,7 @@ HIDDEN_FACTOR = 0.5       # hidden_dim * factor -> first encoder hidden
 BATCH_SIZE = 256
 LR = 1e-3
 WEIGHT_DECAY = 1e-5
-EPOCHS = 3
+EPOCHS = 6
 LAMBDA_L1 = 1e-4          # coefficient for L1 on latent
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("batch size:", BATCH_SIZE)
@@ -31,8 +31,6 @@ print("batch size:", BATCH_SIZE)
 # -------- Utility: load activations and labels --------
 activations: torch.Tensor = torch.load(ACTIVATIONS_PATH, weights_only=True)  # (N_TOKENS, EMBED_DIMS)
 activations = activations.float()
-
-print(f"Loaded activations, shape:", activations.shape)
 
 # -------- Create dataset and splits --------
 dataset = TensorDataset(activations)
@@ -66,10 +64,11 @@ class SAE(nn.Module):
         return reconstruction, saprse_activation
 
 sae = SAE(
-        model_embed_size=activations.shape[1],
-        sparse_activation_expantion=8,
-        dropout_ratio=0.2,
-    ).to(device)
+    model_embed_size=activations.shape[1],
+    sparse_activation_expantion=8,
+    dropout_ratio=0.2,
+)
+sae = sae.to(device)
 # sae = torch.compile(sae)
 optimizer = torch.optim.AdamW(sae.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 mse_loss = nn.MSELoss(reduction="mean")
@@ -95,25 +94,46 @@ if USE_BFLOAT16:
 else:
     autocast_ctx = nullcontext
 
-# -------- Training loop --------
+def train_sae(sae: nn.Module):
+    eval_model(sae, 0, 0)
+    for epoch in range(1, EPOCHS + 1):
+        sae.train()
+        train_loss = 0.0
+        for (xb, ) in tqdm(train_loader):
+            xb = xb.to(device)
+            with autocast_ctx():
+                reconstruction, sparse_activations = sae(xb)
+                loss_recon = mse_loss(reconstruction, xb)
+                loss_l1 = sparse_activations.abs().mean()
+                loss = loss_recon + LAMBDA_L1 * loss_l1
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item() * xb.size(0)
+
+        train_loss /= len(train_loader.dataset)
+        eval_model(sae, epoch, train_loss)
+
 def eval_model(model: nn.Module, epoch: int, train_loss: float):
     model.eval()
-    val_loss = 0.0
+    val_loss = 0
+    l0_norm_loss = 0
     zs_val = []
     with torch.no_grad():
-        for (xb, ) in val_loader:
-            xb = xb.to(device)
-            reconstruction, sparse_activations = model(xb)
-            loss_recon = mse_loss(reconstruction, xb)
+        for (x, ) in val_loader:
+            x = x.to(device)
+            reconstruction, sparse_activations = model(x)
+            loss_recon = mse_loss(reconstruction, x)
             loss_l1 = sparse_activations.abs().mean()
             loss = loss_recon + LAMBDA_L1 * loss_l1
-            val_loss += loss.item() * xb.size(0)
+            val_loss += loss.item() * x.size(0)
             zs_val.append(sparse_activations.cpu().numpy())
+            batch_l0_norm_loss = (sparse_activations != 0).sum().item()
+            l0_norm_loss = batch_l0_norm_loss * x.shape[0]
 
     val_loss /= len(val_loader.dataset)
     zs_val = np.vstack(zs_val) if len(zs_val) else np.zeros((0, BOTTLE_DIM))
-
-    print(f"Epoch {epoch:03d} | Train loss {train_loss:.6f} | Val loss {val_loss:.6f}")
+    print(f"Epoch {epoch} | Train loss {train_loss:.3f} | Val loss {val_loss:.3f} | l0_norm_loss {l0_norm_loss:.3f}")
     classify_category_from_sae_features(model)
 
 def set_require_grad(module: nn.Module, value: bool):
@@ -135,14 +155,15 @@ def classify_category_from_sae_features(sae: nn.Module):
     set_require_grad(sae, False)
     meta_df = pd.read_parquet("dataset/token_metadata.parquet")
     meta_df["token_idx"] = np.arange(len(meta_df))
-    meta_df = meta_df.query("subcategory.notna()")
+    meta_df = meta_df.query("subcategory.notna() & token_pos >= 10")
+
     targets = pd.get_dummies(meta_df["subcategory"]).astype("float").values
     targets = torch.from_numpy(targets)
     cls_model = TokenQuestionClassifier(sae, targets.shape[1]).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adadelta(cls_model.parameters())
     cls_dataset = TensorDataset(
-        activations[meta_df["token_idx"]],
+        activations[meta_df["token_idx"].values],
         targets,
     )
     n_train = int(len(cls_dataset) * 0.8)
@@ -154,7 +175,7 @@ def classify_category_from_sae_features(sae: nn.Module):
     )
     train_dl = DataLoader(train_ds, BATCH_SIZE)
     val_dl = DataLoader(val_ds, BATCH_SIZE)
-    for epoch in range(2):
+    for epoch in range(4):
         train_loss = 0
         cls_model.train()
         for x, y in train_dl:
@@ -175,26 +196,17 @@ def classify_category_from_sae_features(sae: nn.Module):
                 y_pred: Tensor = cls_model(x)
                 batch_loss = criterion(y_pred, y)
                 val_loss += batch_loss.item() * x.size(0) / len(train_loader.dataset)
-                batch_accuracy = (y_pred.max(dim=1).indices == y.max(dim=1).indices).mean()
-                val_accuracy += batch_accuracy.item() * x.size(0) / len(train_loader.dataset)
-        print(f"epoch {epoch}, train loss {train_loss}, val loss {val_loss}, val accuracy {val_accuracy}")
+                batch_accuracy = (
+                    (y_pred.max(dim=1).indices == y.max(dim=1).indices)
+                    .float()
+                    .mean()
+                    .item()
+                )
+                val_accuracy += batch_accuracy * x.size(0) / len(train_loader.dataset)
+        print(f"epoch {epoch}, train loss {train_loss:.3f}, val loss {val_loss:.3f}, val accuracy {val_accuracy:.3f}")
     set_require_grad(sae, True)
 
-eval_model(sae, 0, 0)
-for epoch in range(1, EPOCHS + 1):
-    sae.train()
-    train_loss = 0.0
-    for (xb, ) in tqdm(train_loader):
-        xb = xb.to(device)
-        with autocast_ctx():
-            reconstruction, sparse_activations = sae(xb)
-            loss_recon = mse_loss(reconstruction, xb)
-            loss_l1 = sparse_activations.abs().mean()
-            loss = loss_recon + LAMBDA_L1 * loss_l1
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        train_loss += loss.item() * xb.size(0)
+# def mk_token_category_dataset() -> TensorDataset:
 
-    train_loss /= len(train_loader.dataset)
-    eval_model(sae, epoch, train_loss)
+if __name__ == "__main__":
+    train_sae(sae)
