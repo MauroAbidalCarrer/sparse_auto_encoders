@@ -90,6 +90,6 @@ hf auth login --token $(cat ~/.vast_hf_token)
 # Download dataset from S3
 echo "Downloading dataset from S3..."
 mkdir -p dataset
-aws s3 cp s3://vastdataset/sae/ ./dataset --recursive
+# aws s3 cp s3://vastdataset/sae/ ./dataset --recursive
 echo "S3 dataset download completed successfully."
 EOF
