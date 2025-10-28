@@ -1,7 +1,11 @@
 import os
+import warnings
 from tqdm import tqdm
 from functools import partial
 from contextlib import nullcontext
+
+# Ignore the wandb warning(this is a bad practice I know)
+warnings.filterwarnings("ignore") 
 
 import wandb
 import torch
