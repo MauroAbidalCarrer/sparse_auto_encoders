@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 from torch import nn
 from torch import Tensor
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 
@@ -44,10 +45,10 @@ OUT_DIR = "sae_output"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # -------- HYPERPARAMS --------
-BATCH_SIZE = 256
-LR = 1e-3
+BATCH_SIZE = 128
+LR = 1e-4
 WEIGHT_DECAY = 1e-5
-SAE_EPOCHS = 6
+SAE_EPOCHS = 12
 LAMBDA_L1 = 1e-4          # coefficient for L1 on latent
 # -------- Utility: load activations and labels --------
 activations: torch.Tensor = torch.load(ACTIVATIONS_PATH, weights_only=True)  # (N_TOKENS, EMBED_DIMS)
@@ -62,7 +63,6 @@ train_ds, val_ds = random_split(
     [n_train, n_val],
     generator=torch.Generator().manual_seed(42),
 )
-
 train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
 
