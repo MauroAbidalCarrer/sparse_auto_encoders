@@ -1,3 +1,4 @@
+wandb/*
 dataset/*
 *.pt
 *test*
