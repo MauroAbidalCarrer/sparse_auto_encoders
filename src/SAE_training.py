@@ -98,7 +98,7 @@ mse_loss = nn.MSELoss(reduction="mean")
 # Weights and Biases
 LOG_COMMIT_FREQ = 100
 wandb.init(
-    project="gpt-training",
+    project="sparse-auto-encoders",
     config={
         "weight_decay": WEIGHT_DECAY,
         "lr": LR,
