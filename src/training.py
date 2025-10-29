@@ -51,7 +51,7 @@ BATCH_SIZE = 512
 print(BATCH_SIZE)
 LR = 1e-4
 WEIGHT_DECAY = 1e-5
-SAE_EPOCHS = 12
+SAE_EPOCHS = 64
 LAMBDA_L1 = 1e-4          # coefficient for L1 on latent
 # -------- Utility: load activations and labels --------
 activations: torch.Tensor = torch.load(ACTIVATIONS_PATH, weights_only=True)  # (N_TOKENS, EMBED_DIMS)
@@ -69,14 +69,16 @@ train_ds, val_ds = random_split(
 train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
 
-EXPANSION_RATIO = 4
+EXPANSION_RATIO = 16
 N_LATENTS = activations.shape[1] * EXPANSION_RATIO
+USE_NORMALIZATION = False
+K = 256
 sae = SparseAutoencoder(
     n_inputs=activations.shape[1],
     n_latents=N_LATENTS,
-    activation=TopK,
+    activation=TopK(256),
     tied=True,
-    normalize=True,
+    normalize=USE_NORMALIZATION,
 )
 sae = sae.to(device)
 # sae = torch.compile(sae)
@@ -95,6 +97,8 @@ wandb.init(
         "sae_training_epochs": SAE_EPOCHS,
         "using_bfloat16": USE_BFLOAT16,
         "sparse_activations_size": N_LATENTS,
+        "normalization": USE_NORMALIZATION,
+        "K": K,
     }
 )
 
@@ -149,7 +153,7 @@ def eval_model(sae: nn.Module, step: int):
         },
         step=step
     )
-    # classify_category_from_sae_features(model, step)
+    classify_category_from_sae_features(sae, step)
     
 class TokenQuestionClassifier(nn.Module):
     def __init__(self, sae: nn.Module, n_targets: int):
