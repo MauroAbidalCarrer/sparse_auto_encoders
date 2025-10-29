@@ -12,7 +12,7 @@ def LN(x: torch.Tensor, eps: float = 1e-5) -> tuple[torch.Tensor, torch.Tensor, 
     x = x / (std + eps)
     return x, mu, std
 
-class Autoencoder(nn.Module):
+class SparseAutoencoder(nn.Module):
     """Sparse autoencoder
 
     Implements:
@@ -110,7 +110,7 @@ class Autoencoder(nn.Module):
     @classmethod
     def from_state_dict(
         cls, state_dict: dict[str, torch.Tensor], strict: bool = True
-    ) -> "Autoencoder":
+    ) -> "SparseAutoencoder":
         n_latents, d_model = state_dict["encoder.weight"].shape
 
         # Retrieve activation
