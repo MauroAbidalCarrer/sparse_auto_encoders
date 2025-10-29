@@ -3,7 +3,12 @@
     - N2G
     - ablation loss
 - Better match the OpenAI implementation:
-    - Increase latent size, k
-    - Use gradient clipping 
-    - Increase batch size
-    - Use better metric (ablation loss?)
+    - architecture
+        - Increase latent size, k
+        - Use tokens in later layers like the ~15th (out of 20) layer
+    - evaluation:
+        - Use better metric (ablation loss?)
+        - Use normalized MSE
+    - optimization
+        - Use gradient clipping 
+        - Increase batch size
