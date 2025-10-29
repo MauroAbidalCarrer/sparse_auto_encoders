@@ -5,7 +5,7 @@ from functools import partial
 from contextlib import nullcontext
 
 # Ignore the wandb warning(this is a bad practice I know)
-warnings.filterwarnings("ignore") 
+warnings.filterwarnings("ignore")
 
 import wandb
 import torch
@@ -133,7 +133,7 @@ def train_sae(sae: nn.Module):
 def eval_model(sae: nn.Module, step: int):
     sae.eval()
     l0_loss = 0
-    l1_loss = 0 
+    l1_loss = 0
     reconstruction_loss = 0
     with torch.no_grad():
         for (x, ) in val_loader:
@@ -153,7 +153,7 @@ def eval_model(sae: nn.Module, step: int):
         step=step
     )
     classify_category_from_sae_features(sae, step)
-    
+
 class TokenQuestionClassifier(nn.Module):
     def __init__(self, sae: nn.Module, n_targets: int):
         super().__init__()
@@ -164,11 +164,11 @@ class TokenQuestionClassifier(nn.Module):
             nn.LazyBatchNorm1d(),
             nn.LazyLinear(n_targets),
         )
-    
+
     def forward(self, activations: Tensor) -> Tensor:
         _, latents, _ = self.sae(activations)
         return self.clssifier(latents)
-    
+
 def classify_category_from_sae_features(sae: nn.Module, step:int):
     set_require_grad(sae, False)
     cls_dataset = mk_token_category_dataset()
@@ -179,7 +179,7 @@ def classify_category_from_sae_features(sae: nn.Module, step:int):
     n_train = int(len(cls_dataset) * 0.8)
     n_val = len(cls_dataset) - n_train
     train_ds, val_ds = random_split(
-        cls_dataset, 
+        cls_dataset,
         [n_train, n_val],
         generator=torch.Generator().manual_seed(42),
     )
@@ -241,7 +241,7 @@ def set_require_grad(module: nn.Module, value: bool):
 def mk_token_category_dataset() -> TensorDataset:
     meta_df = pd.read_parquet("dataset/token_metadata.parquet")
     meta_df["token_idx"] = np.arange(len(meta_df))
-    meta_df = meta_df.query("subcategory.notna() & token_pos >= 10")
+    meta_df = meta_df.query("subcategory.notna()")
     targets = pd.get_dummies(meta_df["subcategory"]).astype("float").values
     targets = torch.from_numpy(targets)
     return TensorDataset(
