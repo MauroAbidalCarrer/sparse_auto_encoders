@@ -26,6 +26,15 @@
         - Use downstream loss
         - Use normalized MSE
         - Still use L1 loss?
-    - optimization
+    - model optimization
         - Use gradient clipping 
         - Increase batch size to maximize GPU efficiency
+    - processing optimization:
+        - Use sparse/dense matmul kernels
+
+next steps:
+- Use GPT-2
+- Improve dataset
+- Use OpenAI SAE architecture
+- Match latent size and k
+- Use same losses
