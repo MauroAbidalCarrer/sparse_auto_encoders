@@ -152,6 +152,7 @@ def main():
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
     )
+    model = model.eval()
 
     config = AutoConfig.from_pretrained(MODEL_ID)
 
