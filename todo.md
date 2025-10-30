@@ -33,7 +33,7 @@
         - Use sparse/dense matmul kernels
 
 next steps:
-- Use GPT-2
+- Use GPT-2 (done)
 - Improve dataset
 - Use OpenAI SAE architecture
 - Match latent size and k

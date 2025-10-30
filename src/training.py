@@ -45,7 +45,8 @@ OUT_DIR = "sae_output"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # -------- HYPERPARAMS --------
-BATCH_SIZE = 128
+BATCH_SIZE = 512
+print(BATCH_SIZE)
 LR = 1e-4
 WEIGHT_DECAY = 1e-5
 SAE_EPOCHS = 12
@@ -169,15 +170,15 @@ class TokenQuestionClassifier(nn.Module):
         self.sae = sae
         self.clssifier = nn.Sequential(
             nn.LazyBatchNorm1d(),
-            nn.LazyLinear(256),
-            nn.LazyBatchNorm1d(),
+            # nn.LazyLinear(256),
+            # nn.LazyBatchNorm1d(),
             nn.LazyLinear(n_targets),
         )
     
     def forward(self, activations: Tensor) -> Tensor:
         _, sae_features = self.sae(activations)
         return self.clssifier(sae_features)
-    
+
 def classify_category_from_sae_features(sae: nn.Module, step:int):
     set_require_grad(sae, False)
     cls_dataset = mk_token_category_dataset()
@@ -192,13 +193,13 @@ def classify_category_from_sae_features(sae: nn.Module, step:int):
         [n_train, n_val],
         generator=torch.Generator().manual_seed(42),
     )
-    train_dl = DataLoader(train_ds, BATCH_SIZE)
-    val_dl = DataLoader(val_ds, BATCH_SIZE)
-    for epoch in range(8):
+    train_dl = DataLoader(train_ds, BATCH_SIZE * 128)
+    val_dl = DataLoader(val_ds, BATCH_SIZE * 128)
+    for epoch in range(1):
         train_loss = 0
         train_accuracy = 0
         cls_model.train()
-        for x, y in train_dl:
+        for x, y in tqdm(train_dl):
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
             y_pred = cls_model(x)
@@ -250,8 +251,8 @@ def set_require_grad(module: nn.Module, value: bool):
 def mk_token_category_dataset() -> TensorDataset:
     meta_df = pd.read_parquet("dataset/token_metadata.parquet")
     meta_df["token_idx"] = np.arange(len(meta_df))
-    meta_df = meta_df.query("subcategory.notna() & token_pos >= 10")
-    targets = pd.get_dummies(meta_df["subcategory"]).astype("float").values
+    meta_df = meta_df.query("has_label")
+    targets = pd.get_dummies(meta_df["label"]).astype("float").values
     targets = torch.from_numpy(targets)
     return TensorDataset(
         activations[meta_df["token_idx"].values],
