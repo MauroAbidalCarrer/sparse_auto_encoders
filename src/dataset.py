@@ -7,12 +7,12 @@ import pandas as pd
 from datasets import load_dataset
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 
+
 BATCH_SIZE = 64
-MODEL_ID = "QuixiAI/WizardLM-13B-Uncensored"
+MODEL_ID = "openai-community/gpt2"
 HARMFUL_QUESTIONS_DATASET = "fedric95/T2TSyntheticSafetyBench"
 OUT_DIR = "dataset"
 os.makedirs(OUT_DIR, exist_ok=True)
-
 
 class ActivationsRecorder:
     def __init__(self, model: AutoModelForCausalLM, model_config):
@@ -71,7 +71,7 @@ class ActivationsRecorder:
 
     def save_results(self, tokenizer, questions_df):
         # concatenate
-        tokens_tensor = torch.cat(self.collected_token_ids, dim=0)            # (N_tokens,)
+        tokens_tensor = torch.cat(self.collected_token_ids, dim=0)           # (N_tokens,)
         activations_tensor = torch.cat(self.collected_activations, dim=0)    # (N_tokens, H)
         qidx_tensor = torch.cat(self.collected_question_idx, dim=0)          # (N_tokens,)
         pos_tensor = torch.cat(self.collected_token_pos, dim=0)              # (N_tokens,)
