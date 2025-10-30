@@ -7,14 +7,15 @@ import pandas as pd
 from datasets import load_dataset
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 
+
 BATCH_SIZE = 64
-MODEL_ID = "QuixiAI/WizardLM-13B-Uncensored"
-HARMFUL_QUESTIONS_DATASET = "fedric95/T2TSyntheticSafetyBench"
+MODEL_ID = "openai-community/gpt2"
+INPUTS_DATASET = "fedric95/T2TSyntheticSafetyBench"
+LAYER_IDX_FRACTION = 3 / 4
 OUT_DIR = "dataset"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-
-class ActivationsRecorder:
+class ResidualStreamRecorder:
     def __init__(self, model: AutoModelForCausalLM, model_config):
         self.current_attention_mask = None   # torch.Tensor on CPU
         self.current_input_ids = None        # torch.Tensor on CPU
@@ -28,16 +29,19 @@ class ActivationsRecorder:
         self.collected_token_pos = []        # list of 1D int tensors [num_nonpad_tokens]
 
         num_layers = model_config.num_hidden_layers
-        middle_layer = num_layers // 2
-        print(f"Capturing residual-stream-before-layer (input) at layer {middle_layer} (of {num_layers}).")
+        recording_layer = int(num_layers * LAYER_IDX_FRACTION)
+        print(f"Capturing residual-stream-before-layer (input) at layer {recording_layer} (of {num_layers}).")
 
         # register hook on the middle layer; we will read inputs[0] to get the residual stream
-        self.handle = (
-            model
-            .model
-            .layers[middle_layer]
-            .register_forward_hook(self.save_activation_hook)
-        )
+        if hasattr(model, "model") and hasattr(model.model, "layers"):
+            print("using model.layers as layer module")
+            layer_modules = model.model.layers
+        elif hasattr(model, "transformer") and hasattr(model.transformer, "h"):
+            print("using transformer.h as layer module")
+            layer_modules = model.transformer.h
+        else:
+            raise ValueError("Unknown model architecture — cannot locate transformer blocks")
+        self.handle = layer_modules[recording_layer].register_forward_hook(self.save_activation_hook)
 
     def save_activation_hook(self, module: nn.Module, inp, outp):
         """
@@ -62,7 +66,7 @@ class ActivationsRecorder:
         nonpad_tokens = tokens_flat[mask_flat]   # (num_nonpad_tokens,)
         nonpad_qidx = qidx_flat[mask_flat]       # (num_nonpad_tokens,)
         nonpad_pos = pos_flat[mask_flat]         # (num_nonpad_tokens,)
-
+        
         # append
         self.collected_activations.append(nonpad_hidden)
         self.collected_token_ids.append(nonpad_tokens)
@@ -71,7 +75,7 @@ class ActivationsRecorder:
 
     def save_results(self, tokenizer, questions_df):
         # concatenate
-        tokens_tensor = torch.cat(self.collected_token_ids, dim=0)            # (N_tokens,)
+        tokens_tensor = torch.cat(self.collected_token_ids, dim=0)           # (N_tokens,)
         activations_tensor = torch.cat(self.collected_activations, dim=0)    # (N_tokens, H)
         qidx_tensor = torch.cat(self.collected_question_idx, dim=0)          # (N_tokens,)
         pos_tensor = torch.cat(self.collected_token_pos, dim=0)              # (N_tokens,)
@@ -132,7 +136,7 @@ class ActivationsRecorder:
 
 def main():
     # Load questions (including a 'subcategory' column if available)
-    ds = load_dataset(HARMFUL_QUESTIONS_DATASET, split="train")
+    ds = load_dataset(INPUTS_DATASET, split="train")
     df = ds.to_pandas().astype("string")
 
     # Ensure we have a 'question' column
@@ -151,9 +155,14 @@ def main():
 
     config = AutoConfig.from_pretrained(MODEL_ID)
 
-    recorder = ActivationsRecorder(model, config)
+    recorder = ResidualStreamRecorder(model, config)
 
     # Tokenize all questions once (CPU tensors)
+    # Set the pad token to the End Of Sequence token in case it doesn't have pad_token
+    
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    # if "gpt2" in MODEL_ID:
     inputs = tokenizer(df["question"].tolist(), return_tensors="pt", padding=True, truncation=True)
     input_ids = inputs["input_ids"]
     attention_mask = inputs["attention_mask"]
