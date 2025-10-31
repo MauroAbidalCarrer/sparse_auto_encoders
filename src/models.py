@@ -189,22 +189,3 @@ ACTIVATIONS_CLASSES = {
     "Identity": nn.Identity,
     "TopK": TopK,
 }
-
-
-# class SparseAutoEncoder(nn.Module):
-#     def __init__(self, model_embed_size: int, sparse_activation_expantion: int, dropout_ratio: float):
-#         super().__init__()
-#         self.sparse_activations_size = model_embed_size * sparse_activation_expantion
-#         print("sparse_activations_size", self.sparse_activations_size)
-#         self.encoder = nn.Sequential(
-#             nn.Linear(model_embed_size, self.sparse_activations_size),
-#             nn.ReLU(),
-#         )
-#         self.decoder = nn.Sequential(
-#             nn.Linear(self.sparse_activations_size, model_embed_size),
-#         )
-
-#     def forward(self, x):
-#         saprse_activation = self.encoder(x)  # (B, bottle_dim), non-negative due to ReLU
-#         reconstruction = self.decoder(saprse_activation)
-#         return reconstruction, saprse_activation
