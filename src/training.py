@@ -226,10 +226,10 @@ def classify_category_from_sae_features(sae: nn.Module, step:int):
         print(f"epoch {epoch}, train loss {train_loss:.3f}, train_accuracy {train_accuracy:.3f}, val loss {val_loss:.3f}, val accuracy {val_accuracy:.3f}")
     wandb.log(
         data={
-            "calssification/train_loss": train_loss,
-            "calssification/train_accuracy": train_accuracy,
-            "calssification/validation_loss": val_loss,
-            "calssification/validation_accuracy": val_accuracy,
+            "classification/train_loss": train_loss,
+            "classification/train_accuracy": train_accuracy,
+            "classification/validation_loss": val_loss,
+            "classification/validation_accuracy": val_accuracy,
         },
         step=step,
     )
