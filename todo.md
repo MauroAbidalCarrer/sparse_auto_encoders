@@ -22,10 +22,12 @@
         - Build on top of GPT-2
         - Increase latent size, k
         - Use activations in later layers like the ~15th (out of 20) layer for 7B unscensored model, layer 6(?) of GPT-2.
+        - decoder normalization
     - evaluation:
         - Use downstream loss
         - Use normalized MSE
         - Still use L1 loss?
+        - Auxiliary loss
     - model optimization
         - Use gradient clipping 
         - Increase batch size to maximize GPU efficiency
@@ -34,7 +36,7 @@
 
 next steps:
 - Use GPT-2 (done)
-- Improve dataset
-- Use OpenAI SAE architecture
-- Match latent size and k
+- Improve dataset (done)
+- Use OpenAI SAE architecture (done)
+    - Match latent size and k
 - Use same losses
