@@ -39,6 +39,27 @@
         - decoder columns unit normalazation
         - parallel gradient to decoder removal?
 
+- TopK SAELens forward implementation:
+    - Activation norm scaling: divide by mean of training set
+    - Layer norm
+    <!-- - pre/mean bias sub -->
+    - affine transform from encoder (yes, with bias)
+    - topk
+    - relu
+    - sparse optimization stuff
+    - if rescale_acts_by_decoder_norm:
+        scale latent by the norm dim=-1 of the decoder idk why by I assume this is to avoid the L1 loss (on the latent) hacking
+    - if rescale_acts_by_decoder_norm:
+        divide latent by the norm dim=-1 of the decoder I guess this is to compensate for the previous scaling (you scale to prevent the L1 loss on the latent)
+    - affine transform of the decoder 
+    - apply oposite layer norm transform
+
+    - rescale_acts_by_decoder_norm mode makes the sae act as if it has unit normed decoder columns (according to chatGPT):
+        - 
+
+- sparsify implementation:
+
+
 - Better match the OpenAI implementation:
     - data:
         - 10x number of tokens in dataset.
