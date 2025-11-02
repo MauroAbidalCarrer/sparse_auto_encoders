@@ -19,7 +19,22 @@
         - "We scale decoder latent directions to be unit norm at initialization (and also after each training step)" open ai paper A.1 Initialization
         - rescale_acts_by_decoder_norm from SAE lens SAETraining class
         - Why have pre_bias and sbstract it to the input then add it to the decoded output?
+            To deal iwth the mean of the residual stream `input - pre_b` removes the mean, allowing the encoder weights to capture the variance.
+            To restore the mean activation in the reconstruction.
         - Why no bias in encoder but bias in decoder?
+            TO compensate for the non linearity of the encoder.
+        - What does it mean to "fold" in `# fold the estimated norm scaling factor into the sae weights` in the [sae lens traininer](https://github.com/decoderesearch/SAELens/blob/main/sae_lens/training/sae_trainer.py)
+            To "fold the estimated norm scaling factor into the sae weights" means to bake in the scaler normalization of the input.
+            Method definition:
+            ```python
+            @torch.no_grad()
+            def fold_activation_norm_scaling_factor(self, scaling_factor: float):
+                self.W_enc.data *= scaling_factor  # type: ignore
+                self.W_dec.data /= scaling_factor  # type: ignore
+                self.b_dec.data /= scaling_factor  # type: ignore
+                self.cfg.normalize_activations = "none"
+            ```
+            In statistics, "fold" means baking in a normalization step into the model.
     - model optimization:
         - decoder columns unit normalazation
         - parallel gradient to decoder removal?
