@@ -58,7 +58,17 @@
         - 
 
 - sparsify implementation:
-
+    - residual activation mean bias substraction
+    - no bias encoder linear forward
+    - relu then topk
+    - if triton is installed
+        - triton sparse matrix dot product
+    - else
+        - linear decoding done with embedding bag with:
+            - sum reduction
+            - topk latentent indices as indices
+            - topk latent values as weights
+    - mean residual activation bias added
 
 - Better match the OpenAI implementation:
     - data:
