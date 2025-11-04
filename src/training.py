@@ -16,6 +16,8 @@ from torch import Tensor
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
+from models import SparseAutoencoder, TopK
+
 
 # Torch setup
 torch.set_float32_matmul_precision('high')
@@ -49,7 +51,7 @@ BATCH_SIZE = 512
 print(BATCH_SIZE)
 LR = 1e-4
 WEIGHT_DECAY = 1e-5
-SAE_EPOCHS = 12
+SAE_EPOCHS = 64
 LAMBDA_L1 = 1e-4          # coefficient for L1 on latent
 # -------- Utility: load activations and labels --------
 activations: torch.Tensor = torch.load(ACTIVATIONS_PATH, weights_only=True)  # (N_TOKENS, EMBED_DIMS)
@@ -67,29 +69,16 @@ train_ds, val_ds = random_split(
 train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
 
-# -------- Model: simple SAE --------
-class SparseAutoEncoder(nn.Module):
-    def __init__(self, model_embed_size: int, sparse_activation_expantion: int, dropout_ratio: float):
-        super().__init__()
-        self.sparse_activations_size = model_embed_size * sparse_activation_expantion
-        print("sparse_activations_size", self.sparse_activations_size)
-        self.encoder = nn.Sequential(
-            nn.Linear(model_embed_size, self.sparse_activations_size),
-            nn.ReLU(),
-        )
-        self.decoder = nn.Sequential(
-            nn.Linear(self.sparse_activations_size, model_embed_size),
-        )
-
-    def forward(self, x):
-        saprse_activation = self.encoder(x)  # (B, bottle_dim), non-negative due to ReLU
-        reconstruction = self.decoder(saprse_activation)
-        return reconstruction, saprse_activation
-
-sae = SparseAutoEncoder(
-    model_embed_size=activations.shape[1],
-    sparse_activation_expantion=8,
-    dropout_ratio=0.2,
+EXPANSION_RATIO = 16
+N_LATENTS = activations.shape[1] * EXPANSION_RATIO
+USE_NORMALIZATION = False
+K = 256
+sae = SparseAutoencoder(
+    n_inputs=activations.shape[1],
+    n_latents=N_LATENTS,
+    activation=TopK(256),
+    tied=True,
+    normalize=USE_NORMALIZATION,
 )
 sae = sae.to(device)
 # sae = torch.compile(sae)
@@ -107,7 +96,9 @@ wandb.init(
         "l1_loss_weight": LAMBDA_L1,
         "sae_training_epochs": SAE_EPOCHS,
         "using_bfloat16": USE_BFLOAT16,
-        "sparse_activations_size": sae.sparse_activations_size,
+        "sparse_activations_size": N_LATENTS,
+        "normalization": USE_NORMALIZATION,
+        "K": K,
     }
 )
 
@@ -119,11 +110,11 @@ def train_sae(sae: nn.Module):
         for (xb, ) in tqdm(train_loader):
             xb = xb.to(device)
             with autocast_ctx():
-                reconstruction, sparse_activations = sae(xb)
-                reconstruction_loss = mse_loss(reconstruction, xb)
-                l0_loss = (sparse_activations > 0).float().mean()
-                l1_loss = sparse_activations.abs().mean()
-                loss = reconstruction_loss + LAMBDA_L1 * l1_loss
+                _, latents, recons = sae(xb)
+                reconstruction_loss = mse_loss(recons, xb)
+                l0_loss = (latents > 0).float().mean()
+                l1_loss = latents.abs().mean()
+                loss = reconstruction_loss #+ LAMBDA_L1 * l1_loss
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -140,8 +131,8 @@ def train_sae(sae: nn.Module):
             step += 1
         eval_model(sae, step)
 
-def eval_model(model: nn.Module, step: int):
-    model.eval()
+def eval_model(sae: nn.Module, step: int):
+    sae.eval()
     l0_loss = 0
     l1_loss = 0 
     reconstruction_loss = 0
@@ -149,10 +140,10 @@ def eval_model(model: nn.Module, step: int):
         for (x, ) in val_loader:
             x = x.to(device)
             batch_weight = x.shape[0] / len(val_loader.dataset)
-            reconstruction, sparse_activations = model(x)
-            l1_loss += sparse_activations.abs().mean().item() * batch_weight
-            l0_loss += (sparse_activations > 0).float().mean().item() * batch_weight
-            reconstruction_loss += mse_loss(reconstruction, x).item() * batch_weight
+            _, latents, recons = sae(x)
+            l1_loss += latents.abs().mean().item() * batch_weight
+            l0_loss += (latents > 0).float().mean().item() * batch_weight
+            reconstruction_loss += mse_loss(recons, x).item() * batch_weight
     wandb.log(
         data={
             "validation/l1_loss": l1_loss,
@@ -162,7 +153,7 @@ def eval_model(model: nn.Module, step: int):
         },
         step=step
     )
-    classify_category_from_sae_features(model, step)
+    classify_category_from_sae_features(sae, step)
     
 class TokenQuestionClassifier(nn.Module):
     def __init__(self, sae: nn.Module, n_targets: int):
@@ -176,9 +167,9 @@ class TokenQuestionClassifier(nn.Module):
         )
     
     def forward(self, activations: Tensor) -> Tensor:
-        _, sae_features = self.sae(activations)
-        return self.clssifier(sae_features)
-
+        _, latents, _ = self.sae(activations)
+        return self.clssifier(latents)
+    
 def classify_category_from_sae_features(sae: nn.Module, step:int):
     set_require_grad(sae, False)
     cls_dataset = mk_token_category_dataset()
@@ -235,10 +226,10 @@ def classify_category_from_sae_features(sae: nn.Module, step:int):
         print(f"epoch {epoch}, train loss {train_loss:.3f}, train_accuracy {train_accuracy:.3f}, val loss {val_loss:.3f}, val accuracy {val_accuracy:.3f}")
     wandb.log(
         data={
-            "calssification/train_loss": train_loss,
-            "calssification/train_accuracy": train_accuracy,
-            "calssification/validation_loss": val_loss,
-            "calssification/validation_accuracy": val_accuracy,
+            "classification/train_loss": train_loss,
+            "classification/train_accuracy": train_accuracy,
+            "classification/validation_loss": val_loss,
+            "classification/validation_accuracy": val_accuracy,
         },
         step=step,
     )
