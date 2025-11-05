@@ -61,18 +61,14 @@ def load_datasets_as_df(datasets_attrs: list[dict[str, Any]]) -> pd.DataFrame:
         .reset_index(drop=True)
         .astype({
             "input": "string",
-            "label": "category",
             "dataset_id": "category",
         })
         .loc[:, [
             "input",
-            "label",
-            "has_label",
             "dataset_id",
         ]]
     )
     input_datasets["input_idx"] = np.arange(len(input_datasets))
-    input_datasets["label"] = pd.factorize(input_datasets["label"], use_na_sentinel=False)[0]
     return input_datasets
 
 def load_dataset_as_df(dataset_attrs: dict[str, str]) -> pd.DataFrame:
@@ -81,15 +77,12 @@ def load_dataset_as_df(dataset_attrs: dict[str, str]) -> pd.DataFrame:
         .to_pandas()
         .assign(dataset_id=dataset_attrs["id"])
         .rename(columns={
-            dataset_attrs["label_col"]: "label",
             dataset_attrs["input_col"]: "input",
         })
         .astype({
             "input": "string",
-            "label": "category",
             "dataset_id": "category",
         })
-        .eval("has_label = " + dataset_attrs["input_has_label_eval_str"])
     )
 
 class ResidualStreamRecorder:
@@ -118,9 +111,9 @@ class ResidualStreamRecorder:
             layer_modules = model.transformer.h
         else:
             raise ValueError("Unknown model architecture — cannot locate transformer blocks")
-        self.handle = layer_modules[recording_layer].register_forward_hook(self.record_residual_activations)
+        self.handle = layer_modules[recording_layer].register_forward_hook(self._record_residual_activations_hook)
 
-    def record_residual_activations(self, module: nn.Module, inp: torch.Tensor, outp):
+    def _record_residual_activations_hook(self, module: nn.Module, inp: torch.Tensor, outp):
         """
         inp is a tuple of inputs to the layer; inp[0] is the residual stream entering the layer:
         hidden_states shape = (batch, seq_len, hidden_dim).
@@ -185,10 +178,10 @@ class ResidualStreamRecorder:
         # If your questions_df has a default RangeIndex aligned with original dataset, join will work.
         # We'll reset to ensure index is integer position:
         token_meta_df = token_meta_df.merge(
-            dataset_dfs[["input_idx", "label", "has_label", "dataset_id"]],
+            dataset_dfs[["input_idx", "dataset_id"]],
             on="input_idx",
             how="left"
-        ).astype({"label": "category"})
+        )
         print("token meta data frame")
         print(token_meta_df)
 
