@@ -1,5 +1,6 @@
 import os
 from tqdm import tqdm
+from typing import Any
 from code import interact
 
 import torch
@@ -11,43 +12,34 @@ from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 
 
 BATCH_SIZE = 64
-MODEL_ID = "openai-community/gpt2"
+MODEL_ID = "training_a_sparse_autoencoder.ipynb"
 INPUT_DATASETS_ATTRS = [
     {
-        "id": "fedric95/T2TSyntheticSafetyBench",
-        "input_col": "question",
+        "id": "apollo-research/roneneldan-TinyStories-tokenizer-gpt2",
+        "input_col": "input_ids",
         "split": "train",
-        "label_col": "subcategory",
-        "input_has_label_eval_str": "label.notna()",
-    },
-    {
-        "id": "szhuggingface/ag_news",
-        "input_col": "text",
-        "split": "train_1_48k",
-        "label_col": "label",
-        "input_has_label_eval_str": "True",
     },
 ]
 LAYER_IDX_FRACTION = 3 / 4
 OUT_DIR = "dataset"
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-def mk_dataset():
+def mk_dataset(model_id: str, datasets_attrs: list[dict[str, Any]]):
     os.makedirs(OUT_DIR, exist_ok=True)
     # Load model, config and tokenizer
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
+        model_id,
         device_map="auto",
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
     )
     model = model.eval()
-    config = AutoConfig.from_pretrained(MODEL_ID)
-    tokenizer = get_tokenizer(MODEL_ID)
+    config = AutoConfig.from_pretrained(model_id)
+    tokenizer = get_tokenizer(model_id)
     # record residual activations
     recorder = ResidualStreamRecorder(model, config)
-    input_dataset = load_datasets_as_df()
-    record_residual_activations(
+    input_dataset = load_datasets_as_df(datasets_attrs)
+    recorder.record_residual_activations(
         recorder,
         input_dataset,
         model,
@@ -56,10 +48,54 @@ def mk_dataset():
     # Save results: activations + parquet metadata
     recorder.save_results(tokenizer, input_dataset)
 
+def get_tokenizer(model_id: str) -> AutoTokenizer:
+    tokenizer = AutoTokenizer.from_pretrained(model_id, legacy=False)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
+
+def load_datasets_as_df(datasets_attrs: list[dict[str, Any]]) -> pd.DataFrame:
+    input_datasets = list(map(load_dataset_as_df, datasets_attrs))
+    input_datasets = (
+        pd.concat(input_datasets)
+        .reset_index(drop=True)
+        .astype({
+            "input": "string",
+            "label": "category",
+            "dataset_id": "category",
+        })
+        .loc[:, [
+            "input",
+            "label",
+            "has_label",
+            "dataset_id",
+        ]]
+    )
+    input_datasets["input_idx"] = np.arange(len(input_datasets))
+    input_datasets["label"] = pd.factorize(input_datasets["label"], use_na_sentinel=False)[0]
+    return input_datasets
+
+def load_dataset_as_df(dataset_attrs: dict[str, str]) -> pd.DataFrame:
+    return (
+        load_dataset(dataset_attrs["id"], split=dataset_attrs["split"])
+        .to_pandas()
+        .assign(dataset_id=dataset_attrs["id"])
+        .rename(columns={
+            dataset_attrs["label_col"]: "label",
+            dataset_attrs["input_col"]: "input",
+        })
+        .astype({
+            "input": "string",
+            "label": "category",
+            "dataset_id": "category",
+        })
+        .eval("has_label = " + dataset_attrs["input_has_label_eval_str"])
+    )
+
 class ResidualStreamRecorder:
     def __init__(self, model: AutoModelForCausalLM, model_config):
-        self.current_attention_mask = None   # torch.Tensor on CPU
-        self.current_input_ids = None        # torch.Tensor on CPU
+        self.batch_attention_mask = None   # torch.Tensor on CPU
+        self.batch_input_ids = None        # torch.Tensor on CPU
         self.input_indices = None # torch.Tensor on CPU (question idx for each token)
         self.current_token_positions = None  # torch.Tensor on CPU (pos in sequence for each token)
 
@@ -95,9 +131,9 @@ class ResidualStreamRecorder:
         B, S, H = hidden_states.shape
         # flatten batch and sequence dims to index by mask
         hidden_flat = hidden_states.reshape(B * S, H)                # (B*S, H)
-        tokens_flat = self.current_input_ids.reshape(B * S)          # (B*S,)
+        tokens_flat = self.batch_input_ids.reshape(B * S)          # (B*S,)
         # import code; code.interact(local=locals())
-        mask_flat = self.current_attention_mask.reshape(B * S).bool()# (B*S,)
+        mask_flat = self.batch_attention_mask.reshape(B * S).bool()# (B*S,)
         input_idx_flat = self.input_indices.repeat(S).reshape(B * S)           # (B*S,)
         pos_flat = self.current_token_positions.reshape(B * S)       # (B*S,)
         # select non-padding positions (keeps order)
@@ -158,90 +194,36 @@ class ResidualStreamRecorder:
 
         return token_meta_df
 
-def record_residual_activations(
-        recorder: ResidualStreamRecorder,
-        input_dataset_df: pd.DataFrame,
-        model: nn.Module,
-        tokenizer: AutoTokenizer,
-    ):
-    # Load questions (including a 'subcategory' column if available)
-    inputs = tokenizer(input_dataset_df["input"].tolist(), return_tensors="pt", padding=True, truncation=True)
-    input_ids = inputs["input_ids"]
-    attention_mask = inputs["attention_mask"]
-    seq_len = input_ids.size(1)
-    with torch.no_grad():
-        # for i in tqdm(range(0, 200, BATCH_SIZE), desc="recording residual activations"):
-        for i in tqdm(range(0, len(input_dataset_df), BATCH_SIZE), desc="recording residual activations"):
-            batch_slice = slice(i, min(i + BATCH_SIZE, len(input_dataset_df)))
-            batch_input_ids = input_ids[batch_slice].to(device)
-            batch_attn = attention_mask[batch_slice].to(device)
-            batch = {"input_ids": batch_input_ids, "attention_mask": batch_attn}
-            # print(batch_input_ids.shape)
-            # prepare per-batch auxiliary tensors (on CPU) for recorder
-            # question indices in the original DF
-            start_idx = batch_slice.start
-            stop_idx = batch_slice.stop
-            B = stop_idx - start_idx
-            # create question index matrix shape (B, seq_len) with stop_idx because loc is not pythonic idk why...
-            input_indices = input_dataset_df.loc[start_idx:stop_idx - 1, "input_idx"].values
-            # token positions per sequence [0..seq_len-1] shape (B, seq_len)
-            pos_mat = torch.arange(seq_len, dtype=torch.long).unsqueeze(0).repeat(B, 1).cpu()
-            # Set recorder internals
-            recorder.current_input_ids = batch_input_ids.detach().cpu()
-            recorder.current_attention_mask = batch_attn.detach().cpu()
-            recorder.input_indices = input_indices
-            recorder.current_token_positions = pos_mat
-            # forward (hook will fire and capture the input residual stream)
-            # interact(local=locals())
-            _ = model(**batch)
-
-def get_tokenizer(model_id: str) -> AutoTokenizer:
-    tokenizer = AutoTokenizer.from_pretrained(model_id, legacy=False)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    return tokenizer
-
-def load_datasets_as_df() -> pd.DataFrame:
-    input_datasets = list(map(load_dataset_as_df, INPUT_DATASETS_ATTRS))
-    input_datasets = (
-        pd.concat(input_datasets)
-        .reset_index(drop=True)
-        .astype({
-            "input": "string",
-            "label": "category",
-            "dataset_id": "category",
-        })
-        .loc[:, [
-            "input",
-            "label",
-            "has_label",
-            "dataset_id",
-        ]]
-    )
-    input_datasets["input_idx"] = np.arange(len(input_datasets))
-    # interact(local=locals())
-    input_datasets["label"] = pd.factorize(input_datasets["label"], use_na_sentinel=False)[0]
-    # print(input_datasets)
-    # print(input_datasets.dtypes)
-    # print(input_datasets["has_label"].value_counts())
-    return input_datasets
-
-def load_dataset_as_df(dataset_attrs: dict[str, str]) -> pd.DataFrame:
-    return (
-        load_dataset(dataset_attrs["id"], split=dataset_attrs["split"])
-        .to_pandas()
-        .assign(dataset_id=dataset_attrs["id"])
-        .rename(columns={
-            dataset_attrs["label_col"]: "label",
-            dataset_attrs["input_col"]: "input",
-        })
-        .astype({
-            "input": "string",
-            "label": "category",
-            "dataset_id": "category",
-        })
-        .eval("has_label = " + dataset_attrs["input_has_label_eval_str"])
-    )
+    def record_residual_activations(
+            self,
+            input_dataset_df: pd.DataFrame,
+            model: nn.Module,
+            tokenizer: AutoTokenizer,
+        ):
+        # Load questions (including a 'subcategory' column if available)
+        inputs = tokenizer(input_dataset_df["input"].tolist(), return_tensors="pt", padding=True, truncation=True)
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+        seq_len = input_ids.size(1)
+        with torch.no_grad():
+            for i in tqdm(range(0, len(input_dataset_df), BATCH_SIZE), desc="recording residual activations"):
+                batch_slice = slice(i, min(i + BATCH_SIZE, len(input_dataset_df)))
+                self.batch_input_ids = input_ids[batch_slice].to(device)
+                self.batch_attention_mask = attention_mask[batch_slice].to(device)
+                # prepare per-batch auxiliary tensors (on CPU) for recorder
+                # question indices in the original DF
+                start_idx = batch_slice.start
+                stop_idx = batch_slice.stop
+                B = stop_idx - start_idx
+                # create question index matrix shape (B, seq_len) with stop_idx because loc is not pythonic idk why...
+                self.input_indices = input_dataset_df.loc[start_idx:stop_idx - 1, "input_idx"].values
+                # token positions per sequence [0..seq_len-1] shape (B, seq_len)
+                self.current_token_positions = torch.arange(seq_len, dtype=torch.long).unsqueeze(0).repeat(B, 1).cpu()
+                # forward (hook will fire and capture the input residual stream)
+                _ = model(
+                    input_ids=self.batch_input_ids,
+                    attention_mask=self.batch_attention_mask,
+                )
 
 
 if __name__ == "__main__":
