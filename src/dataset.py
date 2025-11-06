@@ -122,6 +122,10 @@ class ResidualStreamRecorder:
         self.dataset_shard_recording_freq = dataset_shard_recording_freq
         self.batch_input_ids = None          # torch.Tensor on CPU
         self.collected_activations = torch.empty(
+            dataset_shard_recording_freq * batch_size,
+            seq_len,
+            model.hidden_size,
+        )
 
         num_layers = model_config.num_hidden_layers
         recording_layer = int(num_layers * LAYER_IDX_FRACTION)
