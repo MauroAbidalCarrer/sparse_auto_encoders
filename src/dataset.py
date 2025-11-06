@@ -1,4 +1,5 @@
 import os
+from time import time
 import gc
 from tqdm import tqdm
 from typing import Any
@@ -14,7 +15,7 @@ from datasets import load_dataset
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 
 
-BATCH_SIZE = 256
+BATCH_SIZE = 2
 MODEL_ID = "roneneldan/TinyStories-1Layer-21M"
 INPUT_DATASETS_CFGS = [
     {
@@ -108,12 +109,19 @@ def load_dataset_as_df(datasets_cfgs: dict[str, str]) -> pd.DataFrame:
     )
 
 class ResidualStreamRecorder:
-    def __init__(self, model: AutoModelForCausalLM, model_config, output_dir: Path, dataset_shard_recording_freq: int):
+    def __init__(self,
+            model: AutoModelForCausalLM,
+            model_config,
+            output_dir: Path,
+            dataset_shard_recording_freq: int,
+            batch_size: int,
+            seq_len: int,
+        ):
         self.model = model
         self.output_dir = output_dir
         self.dataset_shard_recording_freq = dataset_shard_recording_freq
         self.batch_input_ids = None          # torch.Tensor on CPU
-        self.collected_activations = []      # list of tensors [num_nonpad_tokens, hidden_dim]
+        self.collected_activations = torch.empty(
 
         num_layers = model_config.num_hidden_layers
         recording_layer = int(num_layers * LAYER_IDX_FRACTION)
@@ -177,7 +185,9 @@ class ResidualStreamRecorder:
 
     def save_results(self, shard_index: int):
         # concatenate
+        start_time = time()
         self.collected_activations = torch.cat(self.collected_activations, dim=0)
+        print("time to concat:", time() - start_time)
         activations_path = os.path.join(self.output_dir, f"residual_activations_shard_{shard_index}.pt")
         torch.save(self.collected_activations, activations_path)
         print(
@@ -185,12 +195,16 @@ class ResidualStreamRecorder:
             self.collected_activations.shape,
             "saved activations tensor to:",
             activations_path,
+            "time to save:",
+            time() - start_time,
         )
         # Free up memory
+        start_time = time()
         del self.collected_activations
         torch.cuda.empty_cache()
         gc.collect()
         self.collected_activations = []
+        print("time to clear memory:", time() - start_time)
 
 
 
