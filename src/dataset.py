@@ -173,7 +173,7 @@ class ResidualStreamRecorder:
                     input_ids=batch_input_ids,
                 )
                 if batch_i % self.dataset_shard_recording_freq == 0 and batch_i != 0:
-                    self.save_results(batch_i // len(input_ids_dl), )
+                    self.save_results(batch_i // self.dataset_shard_recording_freq)
 
     def save_results(self, shard_index: int):
         # concatenate
