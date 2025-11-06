@@ -56,7 +56,6 @@ def mk_dataset(
         .eval()
     )
     config = AutoConfig.from_pretrained(model_id)
-    # tokenizer = get_tokenizer(model_id)
     # record residual activations
     input_dataset = load_datasets_as_df(datasets_cfgs)
     recorder = ResidualStreamRecorder(model, config)
@@ -105,15 +104,12 @@ def load_dataset_as_df(datasets_cfgs: dict[str, str]) -> pd.DataFrame:
 class ResidualStreamRecorder:
     def __init__(self, model: AutoModelForCausalLM, model_config):
         self.model = model
-        # self.batch_attention_mask = None   # torch.Tensor on CPU
         self.batch_input_ids = None          # torch.Tensor on CPU
-        # self.input_indices = None # torch.Tensor on CPU (question idx for each token)
         self.current_token_positions = None  # torch.Tensor on CPU (pos in sequence for each token)
 
         # collected lists (per-batch fragments)
         self.collected_activations = []      # list of tensors [num_nonpad_tokens, hidden_dim]
         self.collected_token_ids = []        # list of 1D int tensors [num_nonpad_tokens]
-        # self.collected_input_idx = []        # list of 1D int tensors [num_nonpad_tokens]
         self.collected_token_pos = []        # list of 1D int tensors [num_nonpad_tokens]
 
         num_layers = model_config.num_hidden_layers
@@ -142,67 +138,15 @@ class ResidualStreamRecorder:
         B, S, H = hidden_states.shape
         # flatten batch and sequence dims to index by mask
         hidden_flat = hidden_states.reshape(B * S, H)                # (B*S, H)
-        # tokens_ids_flat = self.batch_input_ids.reshape(B * S)          # (B*S,)
-        # mask_flat = self.batch_attention_mask.reshape(B * S).bool()# (B*S,)
-        # input_idx_flat = self.input_indices.repeat(S).reshape(B * S)           # (B*S,)
-        # pos_flat = self.current_token_positions.reshape(B * S)       # (B*S,)
-        # select non-padding positions (keeps order)
-        # nonpad_hidden = hidden_flat[mask_flat]   # (num_nonpad_tokens, H)
-        # nonpad_tokens = tokens_ids_flat[mask_flat]   # (num_nonpad_tokens,)
-        # nonpad_input_idx = input_idx_flat[mask_flat]  # (num_nonpad_tokens,)
-        # nonpad_pos = pos_flat[mask_flat]         # (num_nonpad_tokens,)
-        # append
         self.collected_activations.append(hidden_flat)
-        # self.collected_token_ids.append(nonpad_tokens)
-        # self.collected_input_idx.append(nonpad_input_idx)
-        # self.collected_token_pos.append(nonpad_pos)
 
     def save_results(self, out_dir: Path):
         # concatenate
-        # self.collected_token_ids   = torch.cat(self.collected_token_ids, dim=0)    # (N_tokens,)
         self.collected_activations = torch.cat(self.collected_activations, dim=0)  # (N_tokens, H)
-        # self.collected_input_idx = np.concatenate(self.collected_input_idx)
-        # self.collected_input_idx   = torch.from_numpy(self.collected_input_idx)    # (N_tokens,)
-        # self.collected_token_pos   = torch.cat(self.collected_token_pos, dim=0)    # (N_tokens,)
-        # print("self.collected_token_ids.shape:", self.collected_token_ids.shape)
         print("activations_tensor.shape:", self.collected_activations.shape)
-        # Sanity check
-        # assert tokens_tensor.shape[0] == activations_tensor.shape[0] == input_idx_tensor.shape[0] == pos_tensor.shape[0]
-        # Save activations tensor (efficient contiguous storage)
         activations_path = os.path.join(out_dir, "residual_activations.pt")
         torch.save(self.collected_activations, activations_path)
         print("Saved activations tensor to:", activations_path)
-        # convert token ids -> token strings (batch conversion)
-        # df_meta = self.mk_token_meta_df(tokenizer, intput_dataset_df)
-        # Save metadata as parquet (one row per token)
-        # meta_path = os.path.join(OUT_DIR, "token_metadata.parquet")
-        # import code; code.interact(local=locals())
-        # df_meta.to_parquet(meta_path)
-        # print("Saved token metadata parquet to:", meta_path)
-        # print(df_meta)
-    
-    # def mk_token_meta_df(self, tokenizer, dataset_dfs: pd.DataFrame) -> pd.DataFrame:
-    #     tokens_ids_lst = self.collected_token_ids.tolist()
-    #     tokens_str = tokenizer.convert_ids_to_tokens(tokens_ids_lst, skip_special_tokens=False)
-    #     token_meta_df = pd.DataFrame({
-    #         "token_id": self.collected_token_ids.numpy(),
-    #         "token_str": tokens_str,
-    #         "input_idx": self.collected_input_idx.numpy(),
-    #         "token_pos": self.collected_token_pos.numpy()
-    #     })
-    #     # Join question-level metadata from original dataframe (by question_idx)
-    #     # Ensure questions_df has an index that corresponds to the original position
-    #     # If your questions_df has a default RangeIndex aligned with original dataset, join will work.
-    #     # We'll reset to ensure index is integer position:
-    #     token_meta_df = token_meta_df.merge(
-    #         dataset_dfs[["input_idx", "dataset_id"]],
-    #         on="input_idx",
-    #         how="left"
-    #     )
-    #     print("token meta data frame")
-    #     print(token_meta_df)
-
-    #     return token_meta_df
 
     @torch.no_grad
     def record_residual_activations(
