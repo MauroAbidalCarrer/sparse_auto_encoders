@@ -15,7 +15,7 @@ from datasets import load_dataset
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 
 
-BATCH_SIZE = 256
+BATCH_SIZE = 512
 MODEL_ID = "roneneldan/TinyStories-1Layer-21M"
 INPUT_DATASETS_CFGS = [
     {
@@ -47,6 +47,7 @@ def mk_dataset(
         context_window (int): Context window size (number of tokens passed to the model) during the recording of the activatinos.
         batch_size (int): Pretty self explanatory.
     """
+    torch.set_float32_matmul_precision('high')
     os.makedirs(output_dir_path, exist_ok=True)
     # Load model, config and tokenizer
     model = (
