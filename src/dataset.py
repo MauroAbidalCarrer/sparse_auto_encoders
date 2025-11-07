@@ -15,7 +15,7 @@ from datasets import load_dataset
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 
 
-BATCH_SIZE = 2
+BATCH_SIZE = 256
 MODEL_ID = "roneneldan/TinyStories-1Layer-21M"
 INPUT_DATASETS_CFGS = [
     {
@@ -34,8 +34,9 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 def mk_dataset(
         model_id: str,
         datasets_cfgs: list[dict[str, Any]],
-        context_window: int,
         batch_size: int,
+        seq_len : int,
+        dataset_shard_recording_freq: int,
         output_dir_path: str,
     ):
     """Creates a tensor of the residual activations of the input datasets and savec it in out_dir.
@@ -64,20 +65,12 @@ def mk_dataset(
     recorder = ResidualStreamRecorder(
         model,
         model_config,
-        RESID_ACT_DATASET_PATH,
-        DATASET_SHARD_CACHING_FREQ,
-    )
-    recorder.record_residual_activations(
-        input_dataset,
-        context_window,
+        output_dir_path,
+        dataset_shard_recording_freq,
         batch_size,
+        seq_len,
     )
-
-def get_tokenizer(model_id: str) -> AutoTokenizer:
-    tokenizer = AutoTokenizer.from_pretrained(model_id, legacy=False)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    return tokenizer
+    recorder.record_residual_activations(input_dataset)
 
 def load_datasets_as_df(datasets_cfgs: list[dict[str, Any]]) -> pd.DataFrame:
     input_datasets = list(map(load_dataset_as_df, datasets_cfgs))
@@ -121,11 +114,14 @@ class ResidualStreamRecorder:
         self.output_dir = output_dir
         self.dataset_shard_recording_freq = dataset_shard_recording_freq
         self.batch_input_ids = None          # torch.Tensor on CPU
+        self.batch_size = batch_size
+        self.seq_len = seq_len
         self.collected_activations = torch.empty(
-            dataset_shard_recording_freq * batch_size,
+            (dataset_shard_recording_freq + 1) * batch_size,
             seq_len,
-            model.hidden_size,
+            model_config.hidden_size,
         )
+        self.next_index_to_store_at = 0
 
         num_layers = model_config.num_hidden_layers
         recording_layer = int(num_layers * LAYER_IDX_FRACTION)
@@ -150,18 +146,16 @@ class ResidualStreamRecorder:
         hidden_states = inp[0] if isinstance(inp, (tuple, list)) else inp
         # move to cpu and detach
         hidden_states = hidden_states.detach().cpu()  # (B, S, H)
-        # B, S, H = hidden_states.shape
-        # flatten batch and sequence dims to index by mask
-        hidden_flat = hidden_states #.reshape(B * S, H)                # (B*S, H)
-        self.collected_activations.append(hidden_flat)
+        B, S, H = hidden_states.shape
+        collected_slice = slice(
+            self.next_index_to_store_at,
+            self.next_index_to_store_at + B,
+        )
+        self.collected_activations[collected_slice] = hidden_states
+        self.next_index_to_store_at += B
 
     @torch.no_grad
-    def record_residual_activations(
-            self,
-            input_dataset_df: pd.DataFrame,
-            seq_len: int,
-            batch_size: int,
-        ):
+    def record_residual_activations(self, input_dataset_df: pd.DataFrame):
         """
         Records the residual activations and saves them into self.collected_activations.
         Assumes the dataset to be tokenized, and that each row is a sequence of same length without any padding tokens.
@@ -170,7 +164,11 @@ class ResidualStreamRecorder:
         input_ids = np.concat(input_dataset_df["input_ids"])
         input_ids = torch.from_numpy(input_ids)
         input_ids_ds = TensorDataset(input_ids)
-        input_ids_dl = DataLoader(input_ids_ds, batch_size * seq_len, drop_last=True)
+        input_ids_dl = DataLoader(
+            input_ids_ds,
+            self.batch_size * self.seq_len,
+            drop_last=True,
+        )
         device_type = torch.device(device).type
         with torch.amp.autocast_mode.autocast(device_type, torch.bfloat16):
             batch_it = tqdm(input_ids_dl, desc="recording residual activations")
@@ -178,19 +176,25 @@ class ResidualStreamRecorder:
             for batch_i, (batch_input_ids, ) in batch_it:
                 batch_input_ids = (
                     batch_input_ids
-                    .reshape(batch_size, seq_len)
+                    .reshape(self.batch_size, self.seq_len)
                     .to(device)
                 )
                 _ = self.model(
                     input_ids=batch_input_ids,
                 )
-                if batch_i % self.dataset_shard_recording_freq == 0 and batch_i != 0:
-                    self.save_results(batch_i // self.dataset_shard_recording_freq)
 
-    def save_results(self, shard_index: int):
+                if batch_i % self.dataset_shard_recording_freq == 0 and batch_i != 0:
+                    self.save_shard(batch_i // self.dataset_shard_recording_freq)
+
+    def save_shard(self, shard_index: int):
         # concatenate
         start_time = time()
-        self.collected_activations = torch.cat(self.collected_activations, dim=0)
+        _, S, H = self.collected_activations.shape
+        self.collected_activations = (
+            self
+            .collected_activations
+            .reshape(-1, S, H)
+        )
         print("time to concat:", time() - start_time)
         activations_path = os.path.join(self.output_dir, f"residual_activations_shard_{shard_index}.pt")
         torch.save(self.collected_activations, activations_path)
@@ -202,21 +206,15 @@ class ResidualStreamRecorder:
             "time to save:",
             time() - start_time,
         )
-        # Free up memory
-        start_time = time()
-        del self.collected_activations
-        torch.cuda.empty_cache()
-        gc.collect()
-        self.collected_activations = []
-        print("time to clear memory:", time() - start_time)
-
+        self.next_index_to_store_at = 0
 
 
 if __name__ == "__main__":
     mk_dataset(
         MODEL_ID,
         INPUT_DATASETS_CFGS,
-        CONTEXT_WINDOW,
         BATCH_SIZE,
+        CONTEXT_WINDOW,
+        DATASET_SHARD_CACHING_FREQ,
         RESID_ACT_DATASET_PATH,
     )
