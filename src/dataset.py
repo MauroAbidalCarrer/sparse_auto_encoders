@@ -1,10 +1,10 @@
 import os
-from time import time
 import gc
+from time import time
 from tqdm import tqdm
-from typing import Any
 from pathlib import Path
 from code import interact
+from typing import Any, Optional
 
 import torch
 import numpy as np
@@ -12,7 +12,7 @@ import pandas as pd
 from torch import nn, Tensor
 from torch.utils.data import TensorDataset, DataLoader
 from datasets import load_dataset
-from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM
 
 
 BATCH_SIZE = 512
@@ -27,6 +27,7 @@ INPUT_DATASETS_CFGS = [
 CONTEXT_WINDOW = 512
 LAYER_IDX_FRACTION = 3 / 4
 RESID_ACT_DATASET_PATH = "dataset"
+N_ACTIVATIONS_TO_RECORD = 4096 * 30_000,
 DATASET_SHARD_CACHING_FREQ = 100
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -38,6 +39,7 @@ def mk_dataset(
         seq_len : int,
         dataset_shard_recording_freq: int,
         output_dir_path: str,
+        n_activations_to_record: Optional[int] = None,
     ):
     """Creates a tensor of the residual activations of the input datasets and savec it in out_dir.
 
@@ -71,7 +73,7 @@ def mk_dataset(
         batch_size,
         seq_len,
     )
-    recorder.record_residual_activations(input_dataset)
+    recorder.record_residual_activations(input_dataset, n_activations_to_record)
 
 def load_datasets_as_df(datasets_cfgs: list[dict[str, Any]]) -> pd.DataFrame:
     input_datasets = list(map(load_dataset_as_df, datasets_cfgs))
@@ -156,13 +158,19 @@ class ResidualStreamRecorder:
         self.next_index_to_store_at += B
 
     @torch.no_grad
-    def record_residual_activations(self, input_dataset_df: pd.DataFrame):
+    def record_residual_activations(
+        self,
+        input_dataset_df: pd.DataFrame,
+        n_activations_to_record: Optional[int] = None,
+    ):
         """
         Records the residual activations and saves them into self.collected_activations.
         Assumes the dataset to be tokenized, and that each row is a sequence of same length without any padding tokens.
         That's a lot of assumptions I know.
         """
         input_ids = np.concat(input_dataset_df["input_ids"])
+        n_activations_to_record = n_activations_to_record or len(input_ids)
+        input_ids = input_ids[:n_activations_to_record]
         input_ids = torch.from_numpy(input_ids)
         input_ids_ds = TensorDataset(input_ids)
         input_ids_dl = DataLoader(
@@ -218,4 +226,5 @@ if __name__ == "__main__":
         CONTEXT_WINDOW,
         DATASET_SHARD_CACHING_FREQ,
         RESID_ACT_DATASET_PATH,
+        N_ACTIVATIONS_TO_RECORD
     )
