@@ -1,21 +1,20 @@
 import os
-import gc
+import threading
 from time import time
 from tqdm import tqdm
 from pathlib import Path
-from code import interact
 from typing import Any, Optional
 
 import torch
 import numpy as np
 import pandas as pd
 from torch import nn, Tensor
-from torch.utils.data import TensorDataset, DataLoader
 from datasets import load_dataset
+from torch.utils.data import TensorDataset, DataLoader
 from transformers import AutoConfig, AutoModelForCausalLM
 
 
-BATCH_SIZE = 256
+BATCH_SIZE = 200
 MODEL_ID = "roneneldan/TinyStories-1Layer-21M"
 INPUT_DATASETS_CFGS = [
     {
@@ -198,27 +197,24 @@ class ResidualStreamRecorder:
                     self.save_shard(batch_i // self.dataset_shard_recording_freq)
 
     def save_shard(self, shard_index: int):
-        # concatenate
-        start_time = time()
-        _, S, H = self.collected_activations.shape
-        self.collected_activations = (
-            self
-            .collected_activations
-            .reshape(-1, S, H)
+        activastions_buffer = (
+            self.collected_activations
+            .to(dtype=torch.bfloat16, device="cpu")
+            .clone()
         )
-        print("time to concat:", time() - start_time)
-        activations_path = os.path.join(self.output_dir, f"residual_activations_shard_{shard_index}.pt")
-        torch.save(self.collected_activations, activations_path)
-        print(
-            "activations_tensor.shape:",
-            self.collected_activations.shape,
-            "saved activations tensor to:",
-            activations_path,
-            "time to save:",
-            time() - start_time,
-        )
+        def _save_worker(tensor: Tensor, index: int):
+            start_time = time()
+            activations_path = os.path.join(self.output_dir, f"residual_activations_shard_{index}.pt")
+            torch.save(tensor, activations_path)
+            print(
+                f"[Async save] shard {index} | shape: {tensor.shape} | "
+                f"saved to: {activations_path} | time: {time() - start_time:.2f}s"
+            )
+            del tensor  # free memory
+            torch.cuda.empty_cache()
+        thread = threading.Thread(target=_save_worker, args=(activastions_buffer, shard_index), daemon=True)
+        thread.start()
         self.next_index_to_store_at = 0
-
 
 if __name__ == "__main__":
     mk_dataset(
