@@ -15,7 +15,7 @@ from datasets import load_dataset
 from transformers import AutoConfig, AutoModelForCausalLM
 
 
-BATCH_SIZE = 512
+BATCH_SIZE = 256
 MODEL_ID = "roneneldan/TinyStories-1Layer-21M"
 INPUT_DATASETS_CFGS = [
     {
@@ -27,7 +27,7 @@ INPUT_DATASETS_CFGS = [
 CONTEXT_WINDOW = 512
 LAYER_IDX_FRACTION = 3 / 4
 RESID_ACT_DATASET_PATH = "dataset"
-N_ACTIVATIONS_TO_RECORD = 4096 * 30_000,
+N_ACTIVATIONS_TO_RECORD = 4096 * 30_000
 DATASET_SHARD_CACHING_FREQ = 100
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -177,6 +177,8 @@ class ResidualStreamRecorder:
             input_ids_ds,
             self.batch_size * self.seq_len,
             drop_last=True,
+            shuffle=False,
+            pin_memory=True,
         )
         device_type = torch.device(device).type
         with torch.amp.autocast_mode.autocast(device_type, torch.bfloat16):
