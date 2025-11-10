@@ -118,10 +118,11 @@ class ResidualStreamRecorder:
         self.batch_input_ids = None          # torch.Tensor on CPU
         self.batch_size = batch_size
         self.seq_len = seq_len
-        self.collected_activations = torch.empty(
+        self.shard_buffer = torch.empty(
             (dataset_shard_recording_freq + 1) * batch_size,
             seq_len,
             model_config.hidden_size,
+            dtype=torch.float32,
         )
         self.next_index_to_store_at = 0
 
@@ -131,10 +132,8 @@ class ResidualStreamRecorder:
 
         # register hook on the middle layer; we will read inputs[0] to get the residual stream
         if hasattr(model, "model") and hasattr(model.model, "layers"):
-            print("using model.layers as layer module")
             layer_modules = model.model.layers
         elif hasattr(model, "transformer") and hasattr(model.transformer, "h"):
-            print("using transformer.h as layer module")
             layer_modules = model.transformer.h
         else:
             raise ValueError("Unknown model architecture — cannot locate transformer blocks")
@@ -153,7 +152,7 @@ class ResidualStreamRecorder:
             self.next_index_to_store_at,
             self.next_index_to_store_at + B,
         )
-        self.collected_activations[collected_slice] = hidden_states
+        self.shard_buffer[collected_slice] = hidden_states
         self.next_index_to_store_at += B
 
     @torch.no_grad
@@ -197,22 +196,22 @@ class ResidualStreamRecorder:
                     self.save_shard(batch_i // self.dataset_shard_recording_freq)
 
     def save_shard(self, shard_index: int):
-        activastions_buffer = (
-            self.collected_activations
-            .to(dtype=torch.bfloat16, device="cpu")
-            .clone()
-        )
-        def _save_worker(tensor: Tensor, index: int):
+        def _save_worker(shard: np.ndarray, index: int):
+            print("Starting to save npy shard")
             start_time = time()
-            activations_path = os.path.join(self.output_dir, f"residual_activations_shard_{index:03d}.pt")
-            torch.save(tensor, activations_path)
+            activations_path = os.path.join(self.output_dir, f"residual_activations_shard_{index:03d}.npy")
+            np.save(activations_path, shard, allow_pickle=False)
             print(
-                f"[Async save] shard {index} | shape: {tensor.shape} | "
+                f"[Async save] shard {index} | shape: {shard.shape} | "
                 f"saved to: {activations_path} | time: {time() - start_time:.2f}s"
             )
-            del tensor  # free memory
             torch.cuda.empty_cache()
-        thread = threading.Thread(target=_save_worker, args=(activastions_buffer, shard_index), daemon=True)
+        npy_shard_buff = (
+            self.shard_buffer
+            .reshape(-1, self.shard_buffer.shape[-1])
+            .numpy()
+        )
+        thread = threading.Thread(target=_save_worker, args=(npy_shard_buff, shard_index), daemon=True)
         thread.start()
         self.next_index_to_store_at = 0
 
