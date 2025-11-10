@@ -1,7 +1,7 @@
 import os
 import warnings
+from time import time
 from tqdm import tqdm
-# from e
 from functools import partial
 from contextlib import nullcontext
 
@@ -11,11 +11,13 @@ warnings.filterwarnings("ignore")
 import wandb
 import torch
 import numpy as np
-import pandas as pd
 from torch import nn
-from torch import Tensor
-# from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import (
+    DataLoader,
+    Dataset,
+    random_split,
+    SequentialSampler,
+)
 
 from models import SparseAutoencoder, TopK
 
@@ -56,51 +58,60 @@ SAE_EPOCHS = 64
 LAMBDA_L1 = 1e-4          # coefficient for L1 on latent
 # -------- Utility: load activations and labels --------
 N_ACTIVATIONS_DIMS = 1024
-# activations: torch.Tensor = torch.load(ACTIVATIONS_PATH, weights_only=True)  # (N_TOKENS, EMBED_DIMS)
-# activations = activations.float()
 
 # -------- Create dataset and splits --------
+time_to_load_shards = 0
 class ResidualActivationsDataset(Dataset):
-    def __init__(self, path_to_dataset: str):
+    def __init__(self, paths_to_shards: str):
         super().__init__()
-        self.path_to_dataset = path_to_dataset
-
-    def __len__(self):
-        if hasattr(self, "length"):
-            return self.length
+        self.paths_to_shards = paths_to_shards
         self.shard_lengths = []
         self.length = 0
-        for filename in tqdm(os.listdir(self.path_to_dataset)[:2], desc="Computing the length of each shard"):
-            path = os.path.join(self.path_to_dataset, filename)
-            tensor = torch.load(path, weights_only=True)
-            # tensor = torch.from_file(path)
-            print("shard shape:", tensor.shape)
-            self.shard_lengths.append(tensor.shape[0])
-
+        for file_path in self.paths_to_shards:
+            shard = np.load(file_path, mmap_mode="r", allow_pickle=False)
+            self.shard_lengths.append(shard.shape[0])
+            self.length += shard.shape[0] * shard.shape[1] 
         self.length = sum(self.shard_lengths)
+        self.current_shard_index = None
+
+    def __len__(self):
         return self.length
 
     def __getitem__(self, index: int):
+        global time_to_load_shards
+        start_time = time()
         total_shard_length = 0
-        shard_it = zip(os.listdir(self.path_to_dataset)[:2], self.shard_lengths)
-        for shard_filename, shard_len in shard_it:
-            file_path = os.path.join(self.path_to_dataset, shard_filename)
+        shard_it = enumerate(zip(self.paths_to_shards, self.shard_lengths))
+        for shard_i, (file_path, shard_len) in shard_it:
             if total_shard_length + shard_len > index:
-                return torch.load(file_path, weights_only=True)[index - total_shard_length]
+                time_to_load_shards += time() - start_time
+                if self.current_shard_index is None or shard_i != self.current_shard_index:
+                    self.current_shard = np.load(file_path, mmap_mode="r", allow_pickle=False)
+                    self.current_shard_index = shard_i
+                # print("getting item, shard_i:", shard_i)
+                return self.current_shard[index - total_shard_length]
             total_shard_length += shard_len
         raise IndexError(f"Index {index} is out of range {self.length}")
 
-dataset = ResidualActivationsDataset("dataset")
-print("dataset len:", len(dataset))
-n_train = int(len(dataset) * 0.8)
-n_val = len(dataset) - n_train
-train_ds, val_ds = random_split(
-    dataset,
-    [n_train, n_val],
-    generator=torch.Generator().manual_seed(42),
-)
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
+train_ds = ResidualActivationsDataset([
+    "dataset/residual_activations_shard_001.npy",
+    "dataset/residual_activations_shard_002.npy",
+    "dataset/residual_activations_shard_003.npy",
+    "dataset/residual_activations_shard_004.npy",
+    "dataset/residual_activations_shard_005.npy",
+    "dataset/residual_activations_shard_006.npy",
+    "dataset/residual_activations_shard_007.npy",
+    "dataset/residual_activations_shard_008.npy",
+])
+val_ds = ResidualActivationsDataset([
+    "dataset/residual_activations_shard_009.npy",
+    "dataset/residual_activations_shard_010.npy",
+    "dataset/residual_activations_shard_011.npy",
+])
+train_sampler = SequentialSampler(train_ds)
+train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False, sampler=train_sampler)
+val_sampler = SequentialSampler(val_ds)
+val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, sampler=val_sampler)
 
 EXPANSION_RATIO = 16
 N_LATENTS = N_ACTIVATIONS_DIMS * EXPANSION_RATIO
@@ -170,13 +181,15 @@ def eval_model(sae: nn.Module, step: int):
     l1_loss = 0
     reconstruction_loss = 0
     with torch.no_grad():
-        for (x, ) in val_loader:
+        for x in tqdm(val_loader, desc="evaluating model on validation split."):
             x = x.to(device)
             batch_weight = x.shape[0] / len(val_loader.dataset)
             _, latents, recons = sae(x)
             l1_loss += latents.abs().mean().item() * batch_weight
             l0_loss += (latents > 0).float().mean().item() * batch_weight
             reconstruction_loss += mse_loss(recons, x).item() * batch_weight
+    print("time to load shards:", time_to_load_shards)
+    time_to_load_shards = 0
     wandb.log(
         data={
             "validation/l1_loss": l1_loss,
