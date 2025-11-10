@@ -50,7 +50,7 @@ OUT_DIR = "sae_output"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # -------- HYPERPARAMS --------
-BATCH_SIZE = 512
+BATCH_SIZE = int(2 ** 14)
 print("batch size:", BATCH_SIZE)
 LR = 1e-4
 WEIGHT_DECAY = 1e-5
@@ -66,11 +66,14 @@ class ResidualActivationsDataset(Dataset):
         super().__init__()
         self.paths_to_shards = paths_to_shards
         self.shard_lengths = []
-        self.length = 0
-        for file_path in self.paths_to_shards:
-            shard = np.load(file_path, mmap_mode="r", allow_pickle=False)
-            self.shard_lengths.append(shard.shape[0])
-            self.length += shard.shape[0] * shard.shape[1] 
+        shard_len = torch.load(paths_to_shards[0], weights_only=True).shape[0]
+        print("shard_len:", shard_len)
+        # for file_path in self.paths_to_shards:
+        #     self.current_shard = torch.load(file_path, weights_only=True)
+        #     # shard = np.load(file_path, mmap_mode="r", allow_pickle=False)
+        #     self.shard_lengths.append(shard.shape[0])
+        #     self.length += shard.shape[0] * shard.shape[1] 
+        self.shard_lengths = [shard_len] * len(paths_to_shards)
         self.length = sum(self.shard_lengths)
         self.current_shard_index = None
 
@@ -86,7 +89,7 @@ class ResidualActivationsDataset(Dataset):
             if total_shard_length + shard_len > index:
                 time_to_load_shards += time() - start_time
                 if self.current_shard_index is None or shard_i != self.current_shard_index:
-                    self.current_shard = np.load(file_path, mmap_mode="r", allow_pickle=False)
+                    self.current_shard = torch.load(file_path, weights_only=True)
                     self.current_shard_index = shard_i
                 # print("getting item, shard_i:", shard_i)
                 return self.current_shard[index - total_shard_length]
@@ -184,10 +187,12 @@ def eval_model(sae: nn.Module, step: int):
         for x in tqdm(val_loader, desc="evaluating model on validation split."):
             x = x.to(device)
             batch_weight = x.shape[0] / len(val_loader.dataset)
-            _, latents, recons = sae(x)
+            with autocast_ctx():
+                _, latents, recons = sae(x)
             l1_loss += latents.abs().mean().item() * batch_weight
             l0_loss += (latents > 0).float().mean().item() * batch_weight
             reconstruction_loss += mse_loss(recons, x).item() * batch_weight
+    global time_to_load_shards
     print("time to load shards:", time_to_load_shards)
     time_to_load_shards = 0
     wandb.log(
