@@ -204,7 +204,7 @@ class ResidualStreamRecorder:
         )
         def _save_worker(tensor: Tensor, index: int):
             start_time = time()
-            activations_path = os.path.join(self.output_dir, f"residual_activations_shard_{index}.pt")
+            activations_path = os.path.join(self.output_dir, f"residual_activations_shard_{index:03d}.pt")
             torch.save(tensor, activations_path)
             print(
                 f"[Async save] shard {index} | shape: {tensor.shape} | "
