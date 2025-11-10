@@ -87,11 +87,10 @@ class ResidualActivationsDataset(Dataset):
         shard_it = enumerate(zip(self.paths_to_shards, self.shard_lengths))
         for shard_i, (file_path, shard_len) in shard_it:
             if total_shard_length + shard_len > index:
-                time_to_load_shards += time() - start_time
                 if self.current_shard_index is None or shard_i != self.current_shard_index:
                     self.current_shard = torch.load(file_path, weights_only=True)
                     self.current_shard_index = shard_i
-                # print("getting item, shard_i:", shard_i)
+                time_to_load_shards += time() - start_time
                 return self.current_shard[index - total_shard_length]
             total_shard_length += shard_len
         raise IndexError(f"Index {index} is out of range {self.length}")
