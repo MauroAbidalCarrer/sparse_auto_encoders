@@ -2,6 +2,7 @@ import os
 import warnings
 from time import time
 from tqdm import tqdm
+from threading import Thread
 from functools import partial
 from contextlib import nullcontext
 
@@ -60,48 +61,98 @@ N_ACTIVATIONS_DIMS = 1024
 # -------- Create dataset and splits --------
 time_to_load_shards = 0
 class ResidualActivationsDataset(Dataset):
-    def __init__(self, paths_to_shards: str):
+    def __init__(self, paths_to_shards: list[str], device: str="cpu"):
         super().__init__()
+        self.device = device
         self.paths_to_shards = paths_to_shards
-        self.current_shard = torch.load(paths_to_shards[0], weights_only=True)
+        self.num_shards = len(paths_to_shards)
+
+        # Load first shard synchronously
+        self.current_shard_index = 0
+        self.current_shard = torch.load(paths_to_shards[0], weights_only=True, map_location=self.device)
         self.shards_len = self.current_shard.shape[0]
-        print("self.shards_len:", self.shards_len)
-        self.length = self.shards_len * len(paths_to_shards)
-        self.current_shard_index = 0        
+        self.length = self.shards_len * self.num_shards
+
+        # For async preloading
+        self.next_shard = None
+        self.next_shard_index = (self.current_shard_index + 1) % self.num_shards
+        self._preload_thread = None
+        self._start_async_load(self.next_shard_index)
+
+        print(f"Loaded shard 0 of {self.num_shards}, each shard len = {self.shards_len}")
+
+    def _load_shard(self, shard_index: int):
+        """Background loader for a shard."""
+        file_path = self.paths_to_shards[shard_index]
+        return torch.load(file_path, weights_only=True, map_location=self.device)
+
+    def _start_async_load(self, shard_index: int):
+        """Start async loading in a background thread."""
+        if self._preload_thread is not None and self._preload_thread.is_alive():
+            return  # avoid overlapping loads
+
+        def _worker():
+            self.next_shard = self._load_shard(shard_index)
+            self.next_shard_index = shard_index
+
+        self._preload_thread = Thread(target=_worker, daemon=True)
+        self._preload_thread.start()
+
+    def _switch_to_next_shard(self):
+        """Switch to the preloaded shard and start loading the next one."""
+        if self._preload_thread is not None:
+            self._preload_thread.join()  # ensure shard fully loaded
+
+        self.current_shard = self.next_shard
+        self.current_shard_index = self.next_shard_index
+        next_index = (self.current_shard_index + 1) % self.num_shards
+        self._start_async_load(next_index)
 
     def __len__(self):
         return self.length
 
     def __getitem__(self, index: int):
-        shard_i = index // self.shards_len        
-        global time_to_load_shards
         start_time = time()
-        if self.current_shard_index != shard_i:
-            file_path = self.paths_to_shards[shard_i]
-            self.current_shard = torch.load(file_path, weights_only=True)
-            self.current_shard_index = shard_i
-        time_to_load_shards += time() - start_time
-        return self.current_shard[index - shard_i * self.shards_len]
+        global time_to_load_shards
+        shard_i = index // self.shards_len
+        shard_local_i = index % self.shards_len
 
-train_ds = ResidualActivationsDataset([
-    "dataset/residual_activations_shard_001.npy",
-    "dataset/residual_activations_shard_002.npy",
-    "dataset/residual_activations_shard_003.npy",
-    "dataset/residual_activations_shard_004.npy",
-    "dataset/residual_activations_shard_005.npy",
-    "dataset/residual_activations_shard_006.npy",
-    "dataset/residual_activations_shard_007.npy",
-    "dataset/residual_activations_shard_008.npy",
-])
-val_ds = ResidualActivationsDataset([
-    "dataset/residual_activations_shard_009.npy",
-    "dataset/residual_activations_shard_010.npy",
-    "dataset/residual_activations_shard_011.npy",
-])
-train_sampler = SequentialSampler(train_ds)
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False, sampler=train_sampler)
-val_sampler = SequentialSampler(val_ds)
-val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, sampler=val_sampler)
+        # Switch shards if needed
+        if self.current_shard_index != shard_i:
+            self._switch_to_next_shard()
+            print(f"Switched to shard {self.current_shard_index} in {time() - start_time:.2f}s")
+        time_to_load_shards += time() - start_time
+        return self.current_shard[shard_local_i]
+
+train_ds = ResidualActivationsDataset(
+    paths_to_shards=[
+        "dataset/residual_activations_shard_001.npy",
+        "dataset/residual_activations_shard_002.npy",
+        "dataset/residual_activations_shard_003.npy",
+        "dataset/residual_activations_shard_004.npy",
+        "dataset/residual_activations_shard_005.npy",
+        "dataset/residual_activations_shard_006.npy",
+        "dataset/residual_activations_shard_007.npy",
+        "dataset/residual_activations_shard_008.npy",
+    ],
+)
+val_ds = ResidualActivationsDataset(
+    paths_to_shards=[
+        "dataset/residual_activations_shard_009.npy",
+        "dataset/residual_activations_shard_010.npy",
+        "dataset/residual_activations_shard_011.npy",
+    ],
+)
+def mk_data_loader(dataset: Dataset) -> DataLoader:
+    return DataLoader(
+        dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        sampler=SequentialSampler(dataset),
+    )
+
+train_loader = mk_data_loader(train_ds)
+val_loader = mk_data_loader(val_ds)
 
 EXPANSION_RATIO = 16
 N_LATENTS = N_ACTIVATIONS_DIMS * EXPANSION_RATIO
