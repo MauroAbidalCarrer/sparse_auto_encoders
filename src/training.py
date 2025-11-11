@@ -68,11 +68,6 @@ class ResidualActivationsDataset(Dataset):
         self.shard_lengths = []
         shard_len = torch.load(paths_to_shards[0], weights_only=True).shape[0]
         print("shard_len:", shard_len)
-        # for file_path in self.paths_to_shards:
-        #     self.current_shard = torch.load(file_path, weights_only=True)
-        #     # shard = np.load(file_path, mmap_mode="r", allow_pickle=False)
-        #     self.shard_lengths.append(shard.shape[0])
-        #     self.length += shard.shape[0] * shard.shape[1] 
         self.shard_lengths = [shard_len] * len(paths_to_shards)
         self.length = sum(self.shard_lengths)
         self.current_shard_index = None
@@ -182,9 +177,12 @@ def eval_model(sae: nn.Module, step: int):
     l0_loss = 0
     l1_loss = 0
     reconstruction_loss = 0
+    time_to_move_to_device = 0
     with torch.no_grad():
         for x in tqdm(val_loader, desc="evaluating model on validation split."):
+            start_time = time()
             x = x.to(device)
+            time_to_move_to_device += time() - start_time
             batch_weight = x.shape[0] / len(val_loader.dataset)
             with autocast_ctx():
                 _, latents, recons = sae(x)
@@ -192,7 +190,7 @@ def eval_model(sae: nn.Module, step: int):
             l0_loss += (latents > 0).float().mean().item() * batch_weight
             reconstruction_loss += mse_loss(recons, x).item() * batch_weight
     global time_to_load_shards
-    print("time to load shards:", time_to_load_shards)
+    print("time to load shards:", time_to_load_shards, "time_to_move_to_device:", time_to_move_to_device)
     time_to_load_shards = 0
     wandb.log(
         data={
