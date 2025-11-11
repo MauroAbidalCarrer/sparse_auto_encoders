@@ -13,6 +13,7 @@ warnings.filterwarnings("ignore")
 import wandb
 import torch
 from torch import nn, Tensor
+from safetensors.torch import load_file
 from torch.utils.data import (
     DataLoader,
     Dataset,
@@ -69,7 +70,9 @@ class ShardedDataset(Dataset):
         self.batch_size = batch_size
         # init shard attributes
         self.n_shards = len(paths_to_shards)
-        self.load_first_two_shards()
+        self.current_shard_index = 0
+        self.current_shard = self._load_shard(self.current_shard_index)
+        # self.load_first_two_shards()
         self.shards_len = self.current_shard.shape[0]
         self.length = self.shards_len * self.n_shards
 
@@ -78,36 +81,40 @@ class ShardedDataset(Dataset):
     def __len__(self):
         return self.length
 
-    def __getitem__(self, index: int):
-        start_time = time()
-        global time_to_getitem
-        shard_i = index // self.shards_len
-        shard_local_i = index % self.shards_len
-        # Switch shards if needed
-        if self.current_shard_index != shard_i:
-            self._switch_to_next_shard()
-            print(f"Switched to shard {self.current_shard_index} in {time() - start_time:.2f}s")
-        time_to_getitem += time() - start_time
-        return self.current_shard[shard_local_i]
+    # def __getitem__(self, index: int):
+    #     start_time = time()
+    #     global time_to_getitem
+    #     shard_i = index // self.shards_len
+    #     shard_local_i = index % self.shards_len
+    #     # Switch shards if needed
+    #     if self.current_shard_index != shard_i:
+    #         self._switch_to_next_shard()
+    #         print(f"Switched to shard {self.current_shard_index} in {time() - start_time:.2f}s")
+    #     time_to_getitem += time() - start_time
+    #     return self.current_shard[shard_local_i]
 
     def iter_over_batches(self, batch_size: int) -> Generator[Tensor]:
-        if self.current_shard_index != 0:
-            self.load_first_two_shards()
+        self.current_shard_index = 0
+        self.current_shard = self._load_shard(self.current_shard_index)
         for batch_start_i in range(0, self.length, batch_size):
             batch_end_i = batch_start_i + batch_size
             start_shard_i, start_local_shard_i = self.shard_and_local_shard_index(batch_start_i)
             end_shard_i, end_local_shard_i = self.shard_and_local_shard_index(batch_end_i)
-            if start_shard_i != self.current_shard_index:
-                self._switch_to_next_shard()
+            # if start_shard_i != self.current_shard_index:
+            #     self._switch_to_next_shard()
             if start_shard_i == end_shard_i: # The batch lies inside a single shard
                 yield self.current_shard[start_local_shard_i:end_local_shard_i]
-            else: # The batch overlaps over two shards
-                if self._preload_thread is not None:
-                    self._preload_thread.join()  # ensure next shard is fully loaded
+            elif end_shard_i < self.n_shards: # The batch overlaps over two shards
+                next_shard = self._load_shard(end_shard_i)
+                # if self._preload_thread is not None:
+                #     self._preload_thread.join()  # ensure next shard is fully loaded
                 yield torch.cat((
                     self.current_shard[start_local_shard_i:],
-                    self.next_shard[:end_local_shard_i],
+                    next_shard[:end_local_shard_i],
                 ))
+                self.current_shard = next_shard
+            else:
+                yield self.current_shard[start_local_shard_i:]
 
     def shard_and_local_shard_index(self, index: int) -> tuple[int, int]:
         return (
@@ -115,56 +122,55 @@ class ShardedDataset(Dataset):
             index % self.shards_len,
         )
 
-    def load_first_two_shards(self):
-        self.current_shard_index = 0
-        self.current_shard = self._load_shard(self.current_shard_index)
-        self.next_shard = None
-        self._preload_thread = None
-        self._start_async_load_of_next_shard()
+    # def load_first_two_shards(self):
+    #     self.current_shard_index = 0
+    #     self.current_shard = self._load_shard(self.current_shard_index)
+        # self.next_shard = None
+        # self._preload_thread = None
+        # self._start_async_load_of_next_shard()
 
-    def _switch_to_next_shard(self):
-        """Switch to the preloaded shard and start loading the next one."""
-        if self._preload_thread is not None:
-            self._preload_thread.join()  # ensure shard fully loaded
-        self.current_shard = self.next_shard
-        self.current_shard_index = self.next_shard_index
-        self._start_async_load_of_next_shard()
+    # def _switch_to_next_shard(self):
+    #     """Switch to the preloaded shard and start loading the next one."""
+    #     if self._preload_thread is not None:
+    #         self._preload_thread.join()  # ensure shard fully loaded
+    #     self.current_shard = self.next_shard
+    #     self.current_shard_index = self.next_shard_index
+    #     self._start_async_load_of_next_shard()
 
-    def _start_async_load_of_next_shard(self):
-        """Start async loading in a background thread."""
-        def _load_next_shard():
-            self.next_shard = self._load_shard(self.next_shard_index)
-        if self._preload_thread is None or not self._preload_thread.is_alive():
-            self._preload_thread = Thread(target=_load_next_shard, daemon=True)
-            self._preload_thread.start()
+    # def _start_async_load_of_next_shard(self):
+    #     """Start async loading in a background thread."""
+    #     def _load_next_shard():
+    #         self.next_shard = self._load_shard(self.next_shard_index)
+    #     if self._preload_thread is None or not self._preload_thread.is_alive():
+    #         self._preload_thread = Thread(target=_load_next_shard, daemon=True)
+    #         self._preload_thread.start()
 
     @property
     def next_shard_index(self) -> int:
         return (self.current_shard_index + 1) % self.n_shards
 
     def _load_shard(self, shard_index: int):
-        """Background loader for a shard."""
         file_path = self.paths_to_shards[shard_index]
-        return torch.load(file_path, weights_only=True, map_location=self.device)
+        return load_file(file_path)["shard"]
 
 train_ds = ShardedDataset(
     paths_to_shards=[
-        "dataset/residual_activations_shard_001.npy",
-        "dataset/residual_activations_shard_002.npy",
-        "dataset/residual_activations_shard_003.npy",
-        "dataset/residual_activations_shard_004.npy",
-        "dataset/residual_activations_shard_005.npy",
-        "dataset/residual_activations_shard_006.npy",
-        "dataset/residual_activations_shard_007.npy",
-        "dataset/residual_activations_shard_008.npy",
+        "safetensors_dataset/residual_activations_shard_001.safetensor",
+        "safetensors_dataset/residual_activations_shard_002.safetensor",
+        "safetensors_dataset/residual_activations_shard_003.safetensor",
+        "safetensors_dataset/residual_activations_shard_004.safetensor",
+        "safetensors_dataset/residual_activations_shard_005.safetensor",
+        "safetensors_dataset/residual_activations_shard_006.safetensor",
+        "safetensors_dataset/residual_activations_shard_007.safetensor",
+        "safetensors_dataset/residual_activations_shard_008.safetensor",
     ],
     batch_size=BATCH_SIZE,
 )
 val_ds = ShardedDataset(
     paths_to_shards=[
-        "dataset/residual_activations_shard_009.npy",
-        "dataset/residual_activations_shard_010.npy",
-        "dataset/residual_activations_shard_011.npy",
+        "safetensors_dataset/residual_activations_shard_009.safetensor",
+        "safetensors_dataset/residual_activations_shard_010.safetensor",
+        "safetensors_dataset/residual_activations_shard_011.safetensor",
     ],
     batch_size=BATCH_SIZE,
 )
