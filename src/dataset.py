@@ -1,73 +1,130 @@
 import os
+import threading
+from time import time
 from tqdm import tqdm
-from code import interact
+from pathlib import Path
+from typing import Any, Optional
 
 import torch
 import numpy as np
 import pandas as pd
 from torch import nn, Tensor
 from datasets import load_dataset
-from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
+from torch.utils.data import TensorDataset, DataLoader
+from transformers import AutoConfig, AutoModelForCausalLM
 
 
-BATCH_SIZE = 64
-MODEL_ID = "openai-community/gpt2"
-INPUT_DATASETS_ATTRS = [
+BATCH_SIZE = 200
+MODEL_ID = "roneneldan/TinyStories-1Layer-21M"
+INPUT_DATASETS_CFGS = [
     {
-        "id": "fedric95/T2TSyntheticSafetyBench",
-        "input_col": "question",
+        "id": "apollo-research/roneneldan-TinyStories-tokenizer-gpt2",
+        "input_col": "input_ids",
         "split": "train",
-        "label_col": "subcategory",
-        "input_has_label_eval_str": "label.notna()",
-    },
-    {
-        "id": "szhuggingface/ag_news",
-        "input_col": "text",
-        "split": "train_1_48k",
-        "label_col": "label",
-        "input_has_label_eval_str": "True",
     },
 ]
+CONTEXT_WINDOW = 512
 LAYER_IDX_FRACTION = 3 / 4
-OUT_DIR = "dataset"
+RESID_ACT_DATASET_PATH = "dataset"
+N_ACTIVATIONS_TO_RECORD = 4096 * 30_000
+DATASET_SHARD_CACHING_FREQ = 100
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-def mk_dataset():
-    os.makedirs(OUT_DIR, exist_ok=True)
+# Made specifically for Tiny stories for now, will most likely require modifications to work on most HF datasets.
+def mk_dataset(
+        model_id: str,
+        datasets_cfgs: list[dict[str, Any]],
+        batch_size: int,
+        seq_len : int,
+        dataset_shard_recording_freq: int,
+        output_dir_path: str,
+        n_activations_to_record: Optional[int] = None,
+    ):
+    """Creates a tensor of the residual activations of the input datasets and savec it in out_dir.
+
+    Args:
+        model_id (str): hugging face model id
+        datasets_attrs (list[dict[str, Any]]): list of the datasets configs
+        context_window (int): Context window size (number of tokens passed to the model) during the recording of the activatinos.
+        batch_size (int): Pretty self explanatory.
+    """
+    torch.set_float32_matmul_precision('high')
+    os.makedirs(output_dir_path, exist_ok=True)
     # Load model, config and tokenizer
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
-        device_map="auto",
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
+    model = (
+        AutoModelForCausalLM
+        .from_pretrained(
+            model_id,
+            device_map=device,
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True,
+        )
+        .eval()
     )
-    model = model.eval()
-    config = AutoConfig.from_pretrained(MODEL_ID)
-    tokenizer = get_tokenizer(MODEL_ID)
+    model_config = AutoConfig.from_pretrained(model_id)
     # record residual activations
-    recorder = ResidualStreamRecorder(model, config)
-    input_dataset = load_datasets_as_df()
-    record_residual_activations(
-        recorder,
-        input_dataset,
+    input_dataset = load_datasets_as_df(datasets_cfgs)
+    recorder = ResidualStreamRecorder(
         model,
-        tokenizer,
+        model_config,
+        output_dir_path,
+        dataset_shard_recording_freq,
+        batch_size,
+        seq_len,
     )
-    # Save results: activations + parquet metadata
-    recorder.save_results(tokenizer, input_dataset)
+    recorder.record_residual_activations(input_dataset, n_activations_to_record)
+
+def load_datasets_as_df(datasets_cfgs: list[dict[str, Any]]) -> pd.DataFrame:
+    input_datasets = list(map(load_dataset_as_df, datasets_cfgs))
+    input_datasets = (
+        pd.concat(input_datasets)
+        .reset_index(drop=True)
+        .astype({
+            "dataset_id": "category",
+        })
+        .loc[:, [
+            "input_ids",
+            "dataset_id",
+        ]]
+    )
+    input_datasets["input_idx"] = np.arange(len(input_datasets))
+    return input_datasets
+
+def load_dataset_as_df(datasets_cfgs: dict[str, str]) -> pd.DataFrame:
+    return (
+        load_dataset(datasets_cfgs["id"], split=datasets_cfgs["split"])
+        .to_pandas()
+        .assign(dataset_id=datasets_cfgs["id"])
+        .rename(columns={
+            datasets_cfgs["input_col"]: "input_ids",
+        })
+        .astype({
+            "dataset_id": "category",
+        })
+    )
 
 class ResidualStreamRecorder:
-    def __init__(self, model: AutoModelForCausalLM, model_config):
-        self.current_attention_mask = None   # torch.Tensor on CPU
-        self.current_input_ids = None        # torch.Tensor on CPU
-        self.input_indices = None # torch.Tensor on CPU (question idx for each token)
-        self.current_token_positions = None  # torch.Tensor on CPU (pos in sequence for each token)
-
-        # collected lists (per-batch fragments)
-        self.collected_activations = []      # list of tensors [num_nonpad_tokens, hidden_dim]
-        self.collected_token_ids = []        # list of 1D int tensors [num_nonpad_tokens]
-        self.collected_input_idx = []        # list of 1D int tensors [num_nonpad_tokens]
-        self.collected_token_pos = []        # list of 1D int tensors [num_nonpad_tokens]
+    def __init__(self,
+            model: AutoModelForCausalLM,
+            model_config,
+            output_dir: Path,
+            dataset_shard_recording_freq: int,
+            batch_size: int,
+            seq_len: int,
+        ):
+        self.model = model
+        self.output_dir = output_dir
+        self.dataset_shard_recording_freq = dataset_shard_recording_freq
+        self.batch_input_ids = None          # torch.Tensor on CPU
+        self.batch_size = batch_size
+        self.seq_len = seq_len
+        self.shard_buffer = torch.empty(
+            (dataset_shard_recording_freq + 1) * batch_size,
+            seq_len,
+            model_config.hidden_size,
+            dtype=torch.float32,
+        )
+        self.next_index_to_store_at = 0
 
         num_layers = model_config.num_hidden_layers
         recording_layer = int(num_layers * LAYER_IDX_FRACTION)
@@ -75,16 +132,14 @@ class ResidualStreamRecorder:
 
         # register hook on the middle layer; we will read inputs[0] to get the residual stream
         if hasattr(model, "model") and hasattr(model.model, "layers"):
-            print("using model.layers as layer module")
             layer_modules = model.model.layers
         elif hasattr(model, "transformer") and hasattr(model.transformer, "h"):
-            print("using transformer.h as layer module")
             layer_modules = model.transformer.h
         else:
             raise ValueError("Unknown model architecture — cannot locate transformer blocks")
-        self.handle = layer_modules[recording_layer].register_forward_hook(self.record_residual_activations)
+        self.handle = layer_modules[recording_layer].register_forward_hook(self._residual_activations_recording_hook)
 
-    def record_residual_activations(self, module: nn.Module, inp: torch.Tensor, outp):
+    def _residual_activations_recording_hook(self, _: nn.Module, inp: torch.Tensor, outp: torch.Tensor):
         """
         inp is a tuple of inputs to the layer; inp[0] is the residual stream entering the layer:
         hidden_states shape = (batch, seq_len, hidden_dim).
@@ -93,156 +148,80 @@ class ResidualStreamRecorder:
         # move to cpu and detach
         hidden_states = hidden_states.detach().cpu()  # (B, S, H)
         B, S, H = hidden_states.shape
-        # flatten batch and sequence dims to index by mask
-        hidden_flat = hidden_states.reshape(B * S, H)                # (B*S, H)
-        tokens_flat = self.current_input_ids.reshape(B * S)          # (B*S,)
-        # import code; code.interact(local=locals())
-        mask_flat = self.current_attention_mask.reshape(B * S).bool()# (B*S,)
-        input_idx_flat = self.input_indices.repeat(S).reshape(B * S)           # (B*S,)
-        pos_flat = self.current_token_positions.reshape(B * S)       # (B*S,)
-        # select non-padding positions (keeps order)
-        nonpad_hidden = hidden_flat[mask_flat]   # (num_nonpad_tokens, H)
-        nonpad_tokens = tokens_flat[mask_flat]   # (num_nonpad_tokens,)
-        nonpad_input_idx = input_idx_flat[mask_flat]  # (num_nonpad_tokens,)
-        nonpad_pos = pos_flat[mask_flat]         # (num_nonpad_tokens,)
-        # append
-        self.collected_activations.append(nonpad_hidden)
-        self.collected_token_ids.append(nonpad_tokens)
-        self.collected_input_idx.append(nonpad_input_idx)
-        self.collected_token_pos.append(nonpad_pos)
+        collected_slice = slice(
+            self.next_index_to_store_at,
+            self.next_index_to_store_at + B,
+        )
+        self.shard_buffer[collected_slice] = hidden_states
+        self.next_index_to_store_at += B
 
-    def save_results(self, tokenizer: AutoTokenizer, intput_dataset_df: pd.DataFrame):
-        # concatenate
-        self.collected_token_ids   = torch.cat(self.collected_token_ids, dim=0)    # (N_tokens,)
-        self.collected_activations = torch.cat(self.collected_activations, dim=0)  # (N_tokens, H)
-        self.collected_input_idx = np.concatenate(self.collected_input_idx)
-        self.collected_input_idx   = torch.from_numpy(self.collected_input_idx)    # (N_tokens,)
-        self.collected_token_pos   = torch.cat(self.collected_token_pos, dim=0)    # (N_tokens,)
-        print("self.collected_token_ids.shape:", self.collected_token_ids.shape)
-        print("activations_tensor.shape:", self.collected_activations.shape)
-        # Sanity check
-        # assert tokens_tensor.shape[0] == activations_tensor.shape[0] == input_idx_tensor.shape[0] == pos_tensor.shape[0]
-        # Save activations tensor (efficient contiguous storage)
-        activations_path = os.path.join(OUT_DIR, "middle_layer_activations.pt")
-        torch.save(self.collected_activations, activations_path)
-        print("Saved activations tensor to:", activations_path)
-        # convert token ids -> token strings (batch conversion)
-        df_meta = self.mk_token_meta_df(tokenizer, intput_dataset_df)
-        # Save metadata as parquet (one row per token)
-        meta_path = os.path.join(OUT_DIR, "token_metadata.parquet")
-        # import code; code.interact(local=locals())
-        df_meta.to_parquet(meta_path)
-        print("Saved token metadata parquet to:", meta_path)
-        print(df_meta)
-    
-    def mk_token_meta_df(self, tokenizer, dataset_dfs: pd.DataFrame) -> pd.DataFrame:
-        tokens_ids_lst = self.collected_token_ids.tolist()
-        tokens_str = tokenizer.convert_ids_to_tokens(tokens_ids_lst, skip_special_tokens=False)
-        token_meta_df = pd.DataFrame({
-            "token_id": self.collected_token_ids.numpy(),
-            "token_str": tokens_str,
-            "input_idx": self.collected_input_idx.numpy(),
-            "token_pos": self.collected_token_pos.numpy()
-        })
-        # Join question-level metadata from original dataframe (by question_idx)
-        # Ensure questions_df has an index that corresponds to the original position
-        # If your questions_df has a default RangeIndex aligned with original dataset, join will work.
-        # We'll reset to ensure index is integer position:
-        token_meta_df = token_meta_df.merge(
-            dataset_dfs[["input_idx", "label", "has_label", "dataset_id"]],
-            on="input_idx",
-            how="left"
-        ).astype({"label": "category"})
-        print("token meta data frame")
-        print(token_meta_df)
-
-        return token_meta_df
-
-def record_residual_activations(
-        recorder: ResidualStreamRecorder,
+    @torch.no_grad
+    def record_residual_activations(
+        self,
         input_dataset_df: pd.DataFrame,
-        model: nn.Module,
-        tokenizer: AutoTokenizer,
+        n_activations_to_record: Optional[int] = None,
     ):
-    # Load questions (including a 'subcategory' column if available)
-    inputs = tokenizer(input_dataset_df["input"].tolist(), return_tensors="pt", padding=True, truncation=True)
-    input_ids = inputs["input_ids"]
-    attention_mask = inputs["attention_mask"]
-    seq_len = input_ids.size(1)
-    with torch.no_grad():
-        # for i in tqdm(range(0, 200, BATCH_SIZE), desc="recording residual activations"):
-        for i in tqdm(range(0, len(input_dataset_df), BATCH_SIZE), desc="recording residual activations"):
-            batch_slice = slice(i, min(i + BATCH_SIZE, len(input_dataset_df)))
-            batch_input_ids = input_ids[batch_slice].to(device)
-            batch_attn = attention_mask[batch_slice].to(device)
-            batch = {"input_ids": batch_input_ids, "attention_mask": batch_attn}
-            # print(batch_input_ids.shape)
-            # prepare per-batch auxiliary tensors (on CPU) for recorder
-            # question indices in the original DF
-            start_idx = batch_slice.start
-            stop_idx = batch_slice.stop
-            B = stop_idx - start_idx
-            # create question index matrix shape (B, seq_len) with stop_idx because loc is not pythonic idk why...
-            input_indices = input_dataset_df.loc[start_idx:stop_idx - 1, "input_idx"].values
-            # token positions per sequence [0..seq_len-1] shape (B, seq_len)
-            pos_mat = torch.arange(seq_len, dtype=torch.long).unsqueeze(0).repeat(B, 1).cpu()
-            # Set recorder internals
-            recorder.current_input_ids = batch_input_ids.detach().cpu()
-            recorder.current_attention_mask = batch_attn.detach().cpu()
-            recorder.input_indices = input_indices
-            recorder.current_token_positions = pos_mat
-            # forward (hook will fire and capture the input residual stream)
-            # interact(local=locals())
-            _ = model(**batch)
+        """
+        Records the residual activations and saves them into self.collected_activations.
+        Assumes the dataset to be tokenized, and that each row is a sequence of same length without any padding tokens.
+        That's a lot of assumptions I know.
+        """
+        input_ids = np.concat(input_dataset_df["input_ids"])
+        n_activations_to_record = n_activations_to_record or len(input_ids)
+        input_ids = input_ids[:n_activations_to_record]
+        input_ids = torch.from_numpy(input_ids)
+        input_ids_ds = TensorDataset(input_ids)
+        input_ids_dl = DataLoader(
+            input_ids_ds,
+            self.batch_size * self.seq_len,
+            drop_last=True,
+            shuffle=False,
+            pin_memory=True,
+        )
+        device_type = torch.device(device).type
+        with torch.amp.autocast_mode.autocast(device_type, torch.bfloat16):
+            batch_it = tqdm(input_ids_dl, desc="recording residual activations")
+            batch_it = enumerate(batch_it)
+            for batch_i, (batch_input_ids, ) in batch_it:
+                batch_input_ids = (
+                    batch_input_ids
+                    .reshape(self.batch_size, self.seq_len)
+                    .to(device)
+                )
+                _ = self.model(
+                    input_ids=batch_input_ids,
+                )
 
-def get_tokenizer(model_id: str) -> AutoTokenizer:
-    tokenizer = AutoTokenizer.from_pretrained(model_id, legacy=False)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    return tokenizer
+                if batch_i % self.dataset_shard_recording_freq == 0 and batch_i != 0:
+                    self.save_shard(batch_i // self.dataset_shard_recording_freq)
 
-def load_datasets_as_df() -> pd.DataFrame:
-    input_datasets = list(map(load_dataset_as_df, INPUT_DATASETS_ATTRS))
-    input_datasets = (
-        pd.concat(input_datasets)
-        .reset_index(drop=True)
-        .astype({
-            "input": "string",
-            "label": "category",
-            "dataset_id": "category",
-        })
-        .loc[:, [
-            "input",
-            "label",
-            "has_label",
-            "dataset_id",
-        ]]
-    )
-    input_datasets["input_idx"] = np.arange(len(input_datasets))
-    # interact(local=locals())
-    input_datasets["label"] = pd.factorize(input_datasets["label"], use_na_sentinel=False)[0]
-    # print(input_datasets)
-    # print(input_datasets.dtypes)
-    # print(input_datasets["has_label"].value_counts())
-    return input_datasets
-
-def load_dataset_as_df(dataset_attrs: dict[str, str]) -> pd.DataFrame:
-    return (
-        load_dataset(dataset_attrs["id"], split=dataset_attrs["split"])
-        .to_pandas()
-        .assign(dataset_id=dataset_attrs["id"])
-        .rename(columns={
-            dataset_attrs["label_col"]: "label",
-            dataset_attrs["input_col"]: "input",
-        })
-        .astype({
-            "input": "string",
-            "label": "category",
-            "dataset_id": "category",
-        })
-        .eval("has_label = " + dataset_attrs["input_has_label_eval_str"])
-    )
-
+    def save_shard(self, shard_index: int):
+        def _save_worker(shard: np.ndarray, index: int):
+            print("Starting to save npy shard")
+            start_time = time()
+            activations_path = os.path.join(self.output_dir, f"residual_activations_shard_{index:03d}.npy")
+            np.save(activations_path, shard, allow_pickle=False)
+            print(
+                f"[Async save] shard {index} | shape: {shard.shape} | "
+                f"saved to: {activations_path} | time: {time() - start_time:.2f}s"
+            )
+            torch.cuda.empty_cache()
+        npy_shard_buff = (
+            self.shard_buffer
+            .reshape(-1, self.shard_buffer.shape[-1])
+            .numpy()
+        )
+        thread = threading.Thread(target=_save_worker, args=(npy_shard_buff, shard_index), daemon=True)
+        thread.start()
+        self.next_index_to_store_at = 0
 
 if __name__ == "__main__":
-    mk_dataset()
+    mk_dataset(
+        MODEL_ID,
+        INPUT_DATASETS_CFGS,
+        BATCH_SIZE,
+        CONTEXT_WINDOW,
+        DATASET_SHARD_CACHING_FREQ,
+        RESID_ACT_DATASET_PATH,
+        N_ACTIVATIONS_TO_RECORD
+    )

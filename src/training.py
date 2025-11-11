@@ -1,20 +1,23 @@
 import os
 import warnings
+from time import time
 from tqdm import tqdm
 from functools import partial
 from contextlib import nullcontext
 
 # Ignore the wandb warning(this is a bad practice I know)
-warnings.filterwarnings("ignore") 
+warnings.filterwarnings("ignore")
 
 import wandb
 import torch
 import numpy as np
-import pandas as pd
 from torch import nn
-from torch import Tensor
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.utils.data import (
+    DataLoader,
+    Dataset,
+    random_split,
+    SequentialSampler,
+)
 
 from models import SparseAutoencoder, TopK
 
@@ -42,39 +45,77 @@ else:
     autocast_ctx = nullcontext
 
 # -------- USER: paths to your data files --------
-ACTIVATIONS_PATH = "dataset/middle_layer_activations.pt"  # shape: (N, seq_len, hidden_dim)
+# ACTIVATIONS_PATH = "dataset/middle_layer_activations.pt"  # shape: (N, seq_len, hidden_dim)
 OUT_DIR = "sae_output"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # -------- HYPERPARAMS --------
-BATCH_SIZE = 512
-print(BATCH_SIZE)
+BATCH_SIZE = int(2 ** 14)
+print("batch size:", BATCH_SIZE)
 LR = 1e-4
 WEIGHT_DECAY = 1e-5
 SAE_EPOCHS = 64
 LAMBDA_L1 = 1e-4          # coefficient for L1 on latent
 # -------- Utility: load activations and labels --------
-activations: torch.Tensor = torch.load(ACTIVATIONS_PATH, weights_only=True)  # (N_TOKENS, EMBED_DIMS)
-activations = activations.float()
+N_ACTIVATIONS_DIMS = 1024
 
 # -------- Create dataset and splits --------
-dataset = TensorDataset(activations)
-n_train = int(len(dataset) * 0.8)
-n_val = len(dataset) - n_train
-train_ds, val_ds = random_split(
-    dataset,
-    [n_train, n_val],
-    generator=torch.Generator().manual_seed(42),
-)
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
+time_to_load_shards = 0
+class ResidualActivationsDataset(Dataset):
+    def __init__(self, paths_to_shards: str):
+        super().__init__()
+        self.paths_to_shards = paths_to_shards
+        self.shard_lengths = []
+        shard_len = torch.load(paths_to_shards[0], weights_only=True).shape[0]
+        print("shard_len:", shard_len)
+        self.shard_lengths = [shard_len] * len(paths_to_shards)
+        self.length = sum(self.shard_lengths)
+        self.current_shard_index = None
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, index: int):
+        global time_to_load_shards
+        start_time = time()
+        total_shard_length = 0
+        shard_it = enumerate(zip(self.paths_to_shards, self.shard_lengths))
+        for shard_i, (file_path, shard_len) in shard_it:
+            if total_shard_length + shard_len > index:
+                if self.current_shard_index is None or shard_i != self.current_shard_index:
+                    self.current_shard = torch.load(file_path, weights_only=True)
+                    self.current_shard_index = shard_i
+                time_to_load_shards += time() - start_time
+                return self.current_shard[index - total_shard_length]
+            total_shard_length += shard_len
+        raise IndexError(f"Index {index} is out of range {self.length}")
+
+train_ds = ResidualActivationsDataset([
+    "dataset/residual_activations_shard_001.npy",
+    "dataset/residual_activations_shard_002.npy",
+    "dataset/residual_activations_shard_003.npy",
+    "dataset/residual_activations_shard_004.npy",
+    "dataset/residual_activations_shard_005.npy",
+    "dataset/residual_activations_shard_006.npy",
+    "dataset/residual_activations_shard_007.npy",
+    "dataset/residual_activations_shard_008.npy",
+])
+val_ds = ResidualActivationsDataset([
+    "dataset/residual_activations_shard_009.npy",
+    "dataset/residual_activations_shard_010.npy",
+    "dataset/residual_activations_shard_011.npy",
+])
+train_sampler = SequentialSampler(train_ds)
+train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False, sampler=train_sampler)
+val_sampler = SequentialSampler(val_ds)
+val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, sampler=val_sampler)
 
 EXPANSION_RATIO = 16
-N_LATENTS = activations.shape[1] * EXPANSION_RATIO
+N_LATENTS = N_ACTIVATIONS_DIMS * EXPANSION_RATIO
 USE_NORMALIZATION = False
 K = 256
 sae = SparseAutoencoder(
-    n_inputs=activations.shape[1],
+    n_inputs=N_ACTIVATIONS_DIMS,
     n_latents=N_LATENTS,
     activation=TopK(256),
     tied=True,
@@ -134,16 +175,23 @@ def train_sae(sae: nn.Module):
 def eval_model(sae: nn.Module, step: int):
     sae.eval()
     l0_loss = 0
-    l1_loss = 0 
+    l1_loss = 0
     reconstruction_loss = 0
+    time_to_move_to_device = 0
     with torch.no_grad():
-        for (x, ) in val_loader:
+        for x in tqdm(val_loader, desc="evaluating model on validation split."):
+            start_time = time()
             x = x.to(device)
+            time_to_move_to_device += time() - start_time
             batch_weight = x.shape[0] / len(val_loader.dataset)
-            _, latents, recons = sae(x)
+            with autocast_ctx():
+                _, latents, recons = sae(x)
             l1_loss += latents.abs().mean().item() * batch_weight
             l0_loss += (latents > 0).float().mean().item() * batch_weight
             reconstruction_loss += mse_loss(recons, x).item() * batch_weight
+    global time_to_load_shards
+    print("time to load shards:", time_to_load_shards, "time_to_move_to_device:", time_to_move_to_device)
+    time_to_load_shards = 0
     wandb.log(
         data={
             "validation/l1_loss": l1_loss,
@@ -152,102 +200,6 @@ def eval_model(sae: nn.Module, step: int):
             "validation/loss": reconstruction_loss + l1_loss * LAMBDA_L1
         },
         step=step
-    )
-    classify_category_from_sae_features(sae, step)
-    
-class TokenQuestionClassifier(nn.Module):
-    def __init__(self, sae: nn.Module, n_targets: int):
-        super().__init__()
-        self.sae = sae
-        self.clssifier = nn.Sequential(
-            nn.LazyBatchNorm1d(),
-            # nn.LazyLinear(256),
-            # nn.LazyBatchNorm1d(),
-            nn.LazyLinear(n_targets),
-        )
-    
-    def forward(self, activations: Tensor) -> Tensor:
-        _, latents, _ = self.sae(activations)
-        return self.clssifier(latents)
-    
-def classify_category_from_sae_features(sae: nn.Module, step:int):
-    set_require_grad(sae, False)
-    cls_dataset = mk_token_category_dataset()
-    n_targets = cls_dataset.tensors[1].shape[1]
-    cls_model = TokenQuestionClassifier(sae, n_targets).to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adadelta(cls_model.parameters())
-    n_train = int(len(cls_dataset) * 0.8)
-    n_val = len(cls_dataset) - n_train
-    train_ds, val_ds = random_split(
-        cls_dataset, 
-        [n_train, n_val],
-        generator=torch.Generator().manual_seed(42),
-    )
-    train_dl = DataLoader(train_ds, BATCH_SIZE * 128)
-    val_dl = DataLoader(val_ds, BATCH_SIZE * 128)
-    for epoch in range(1):
-        train_loss = 0
-        train_accuracy = 0
-        cls_model.train()
-        for x, y in tqdm(train_dl):
-            x, y = x.to(device), y.to(device)
-            optimizer.zero_grad()
-            y_pred = cls_model(x)
-            batch_loss = criterion(y_pred, y)
-            batch_loss.backward()
-            optimizer.step()
-            train_loss += batch_loss.item() * x.shape[0] / len(train_loader.dataset)
-            batch_accuracy = (
-                (y_pred.max(dim=1).indices == y.max(dim=1).indices)
-                .float()
-                .mean()
-                .item()
-            )
-            train_accuracy += batch_accuracy * x.shape[0] / len(train_loader.dataset)
-
-        cls_model.eval()
-        # Validation
-        val_loss = 0
-        val_accuracy = 0
-        with torch.no_grad():
-            for x, y in val_dl:
-                x, y = x.to(device), y.to(device)
-                y_pred: Tensor = cls_model(x)
-                batch_loss = criterion(y_pred, y)
-                val_loss += batch_loss.item() * x.size(0) / len(train_loader.dataset)
-                batch_accuracy = (
-                    (y_pred.max(dim=1).indices == y.max(dim=1).indices)
-                    .float()
-                    .mean()
-                    .item()
-                )
-                val_accuracy += batch_accuracy * x.size(0) / len(train_loader.dataset)
-        print(f"epoch {epoch}, train loss {train_loss:.3f}, train_accuracy {train_accuracy:.3f}, val loss {val_loss:.3f}, val accuracy {val_accuracy:.3f}")
-    wandb.log(
-        data={
-            "classification/train_loss": train_loss,
-            "classification/train_accuracy": train_accuracy,
-            "classification/validation_loss": val_loss,
-            "classification/validation_accuracy": val_accuracy,
-        },
-        step=step,
-    )
-    set_require_grad(sae, True)
-
-def set_require_grad(module: nn.Module, value: bool):
-    for param in module.parameters():
-        param.requires_grad = value
-
-def mk_token_category_dataset() -> TensorDataset:
-    meta_df = pd.read_parquet("dataset/token_metadata.parquet")
-    meta_df["token_idx"] = np.arange(len(meta_df))
-    meta_df = meta_df.query("has_label")
-    targets = pd.get_dummies(meta_df["label"]).astype("float").values
-    targets = torch.from_numpy(targets)
-    return TensorDataset(
-        activations[meta_df["token_idx"].values],
-        targets,
     )
 
 if __name__ == "__main__":

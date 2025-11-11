@@ -82,7 +82,7 @@ rm -f ~/.aws_access_key ~/.aws_secret_key
 
 echo "Cloning repo and checking out branch '$CURRENT_BRANCH'..."
 cd repos
-git clone -b "$CURRENT_BRANCH" --single-branch \$WORKING_REPO
+git clone -b "$CURRENT_BRANCH" \$WORKING_REPO
 cd sparse_auto_encoders
 git remote rename origin github
 
