@@ -2,6 +2,8 @@ import os
 import warnings
 from time import time
 from tqdm import tqdm
+from threading import Thread
+from typing import Generator
 from functools import partial
 from contextlib import nullcontext
 
@@ -10,12 +12,10 @@ warnings.filterwarnings("ignore")
 
 import wandb
 import torch
-import numpy as np
-from torch import nn
+from torch import nn, Tensor
 from torch.utils.data import (
     DataLoader,
     Dataset,
-    random_split,
     SequentialSampler,
 )
 
@@ -54,61 +54,130 @@ BATCH_SIZE = int(2 ** 14)
 print("batch size:", BATCH_SIZE)
 LR = 1e-4
 WEIGHT_DECAY = 1e-5
-SAE_EPOCHS = 64
+SAE_EPOCHS = 1
 LAMBDA_L1 = 1e-4          # coefficient for L1 on latent
 # -------- Utility: load activations and labels --------
 N_ACTIVATIONS_DIMS = 1024
 
 # -------- Create dataset and splits --------
-time_to_load_shards = 0
-class ResidualActivationsDataset(Dataset):
-    def __init__(self, paths_to_shards: str):
+time_to_getitem = 0
+class ShardedDataset(Dataset):
+    def __init__(self, paths_to_shards: list[str], batch_size: int, device: str="cpu"):
         super().__init__()
         self.paths_to_shards = paths_to_shards
-        self.shard_lengths = []
-        shard_len = torch.load(paths_to_shards[0], weights_only=True).shape[0]
-        print("shard_len:", shard_len)
-        self.shard_lengths = [shard_len] * len(paths_to_shards)
-        self.length = sum(self.shard_lengths)
-        self.current_shard_index = None
+        self.device = device
+        self.batch_size = batch_size
+        # init shard attributes
+        self.n_shards = len(paths_to_shards)
+        self.load_first_two_shards()
+        self.shards_len = self.current_shard.shape[0]
+        self.length = self.shards_len * self.n_shards
+
+        print(f"Loaded shard 0 of {self.n_shards}, each shard len = {self.shards_len}")
 
     def __len__(self):
         return self.length
 
     def __getitem__(self, index: int):
-        global time_to_load_shards
         start_time = time()
-        total_shard_length = 0
-        shard_it = enumerate(zip(self.paths_to_shards, self.shard_lengths))
-        for shard_i, (file_path, shard_len) in shard_it:
-            if total_shard_length + shard_len > index:
-                if self.current_shard_index is None or shard_i != self.current_shard_index:
-                    self.current_shard = torch.load(file_path, weights_only=True)
-                    self.current_shard_index = shard_i
-                time_to_load_shards += time() - start_time
-                return self.current_shard[index - total_shard_length]
-            total_shard_length += shard_len
-        raise IndexError(f"Index {index} is out of range {self.length}")
+        global time_to_getitem
+        shard_i = index // self.shards_len
+        shard_local_i = index % self.shards_len
+        # Switch shards if needed
+        if self.current_shard_index != shard_i:
+            self._switch_to_next_shard()
+            print(f"Switched to shard {self.current_shard_index} in {time() - start_time:.2f}s")
+        time_to_getitem += time() - start_time
+        return self.current_shard[shard_local_i]
 
-train_ds = ResidualActivationsDataset([
-    "dataset/residual_activations_shard_001.npy",
-    "dataset/residual_activations_shard_002.npy",
-    "dataset/residual_activations_shard_003.npy",
-    "dataset/residual_activations_shard_004.npy",
-    "dataset/residual_activations_shard_005.npy",
-    "dataset/residual_activations_shard_006.npy",
-    "dataset/residual_activations_shard_007.npy",
-    "dataset/residual_activations_shard_008.npy",
-])
-val_ds = ResidualActivationsDataset([
-    "dataset/residual_activations_shard_009.npy",
-    "dataset/residual_activations_shard_010.npy",
-    "dataset/residual_activations_shard_011.npy",
-])
-train_sampler = SequentialSampler(train_ds)
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False, sampler=train_sampler)
-val_sampler = SequentialSampler(val_ds)
-val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, sampler=val_sampler)
+    def iter_over_batches(self, batch_size: int) -> Generator[Tensor]:
+        if self.current_shard_index != 0:
+            self.load_first_two_shards()
+        for batch_start_i in range(0, self.length, batch_size):
+            batch_end_i = batch_start_i + batch_size
+            start_shard_i, start_local_shard_i = self.shard_and_local_shard_index(batch_start_i)
+            end_shard_i, end_local_shard_i = self.shard_and_local_shard_index(batch_end_i)
+            if start_shard_i != self.current_shard_index:
+                self._switch_to_next_shard()
+            if start_shard_i == end_shard_i: # The batch lies inside a single shard
+                yield self.current_shard[start_local_shard_i:end_local_shard_i]
+            else: # The batch overlaps over two shards
+                if self._preload_thread is not None:
+                    self._preload_thread.join()  # ensure next shard is fully loaded
+                yield torch.cat((
+                    self.current_shard[start_local_shard_i:],
+                    self.next_shard[:end_local_shard_i],
+                ))
+
+    def shard_and_local_shard_index(self, index: int) -> tuple[int, int]:
+        return (
+            (index // self.shards_len) % self.n_shards,
+            index % self.shards_len,
+        )
+
+    def load_first_two_shards(self):
+        self.current_shard_index = 0
+        self.current_shard = self._load_shard(self.current_shard_index)
+        self.next_shard = None
+        self._preload_thread = None
+        self._start_async_load_of_next_shard()
+
+    def _switch_to_next_shard(self):
+        """Switch to the preloaded shard and start loading the next one."""
+        if self._preload_thread is not None:
+            self._preload_thread.join()  # ensure shard fully loaded
+        self.current_shard = self.next_shard
+        self.current_shard_index = self.next_shard_index
+        self._start_async_load_of_next_shard()
+
+    def _start_async_load_of_next_shard(self):
+        """Start async loading in a background thread."""
+        def _load_next_shard():
+            self.next_shard = self._load_shard(self.next_shard_index)
+        if self._preload_thread is None or not self._preload_thread.is_alive():
+            self._preload_thread = Thread(target=_load_next_shard, daemon=True)
+            self._preload_thread.start()
+
+    @property
+    def next_shard_index(self) -> int:
+        return (self.current_shard_index + 1) % self.n_shards
+
+    def _load_shard(self, shard_index: int):
+        """Background loader for a shard."""
+        file_path = self.paths_to_shards[shard_index]
+        return torch.load(file_path, weights_only=True, map_location=self.device)
+
+train_ds = ShardedDataset(
+    paths_to_shards=[
+        "dataset/residual_activations_shard_001.npy",
+        "dataset/residual_activations_shard_002.npy",
+        "dataset/residual_activations_shard_003.npy",
+        "dataset/residual_activations_shard_004.npy",
+        "dataset/residual_activations_shard_005.npy",
+        "dataset/residual_activations_shard_006.npy",
+        "dataset/residual_activations_shard_007.npy",
+        "dataset/residual_activations_shard_008.npy",
+    ],
+    batch_size=BATCH_SIZE,
+)
+val_ds = ShardedDataset(
+    paths_to_shards=[
+        "dataset/residual_activations_shard_009.npy",
+        "dataset/residual_activations_shard_010.npy",
+        "dataset/residual_activations_shard_011.npy",
+    ],
+    batch_size=BATCH_SIZE,
+)
+def mk_data_loader(dataset: Dataset) -> DataLoader:
+    return DataLoader(
+        dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        sampler=SequentialSampler(dataset),
+    )
+
+train_loader = mk_data_loader(train_ds)
+val_loader = mk_data_loader(val_ds)
 
 EXPANSION_RATIO = 16
 N_LATENTS = N_ACTIVATIONS_DIMS * EXPANSION_RATIO
@@ -146,13 +215,34 @@ wandb.init(
 def train_sae(sae: nn.Module):
     step = 0
     eval_model(sae, step)
+    time_to_move_to_device = 0
+    prev_batch = None
     for _ in range(1, SAE_EPOCHS + 1):
         sae.train()
-        for (xb, ) in tqdm(train_loader):
-            xb = xb.to(device)
+        batch_it = tqdm(
+            train_ds.iter_over_batches(batch_size=BATCH_SIZE),
+            desc="Training model",
+            total=len(train_loader),
+        )
+        for x in batch_it:
+            start_time = time()
+            x = x.to(device)
+            if prev_batch is not None and prev_batch.shape[0] == x.shape[0]:
+                equality = (prev_batch == x).all(dim=1)
+                # print(
+                #     "n identical samples:",
+                #     equality.sum().item(),
+                #     ", n samples per batch:",
+                #     prev_batch.shape[0],
+                #     "equality shape:",
+                #     equality.shape,
+                # )
+            prev_batch = x
+
+            time_to_move_to_device += time() - start_time
             with autocast_ctx():
-                _, latents, recons = sae(xb)
-                reconstruction_loss = mse_loss(recons, xb)
+                _, latents, recons = sae(x)
+                reconstruction_loss = mse_loss(recons, x)
                 l0_loss = (latents > 0).float().mean()
                 l1_loss = latents.abs().mean()
                 loss = reconstruction_loss #+ LAMBDA_L1 * l1_loss
@@ -170,6 +260,10 @@ def train_sae(sae: nn.Module):
                 commit=step % LOG_COMMIT_FREQ == 0,
             )
             step += 1
+        global time_to_getitem
+        print("time to load shards:", time_to_getitem, "time_to_move_to_device:", time_to_move_to_device)
+        time_to_getitem = 0
+
         eval_model(sae, step)
 
 def eval_model(sae: nn.Module, step: int):
@@ -177,11 +271,28 @@ def eval_model(sae: nn.Module, step: int):
     l0_loss = 0
     l1_loss = 0
     reconstruction_loss = 0
+    prev_batch = None
     time_to_move_to_device = 0
+    batch_it = tqdm(
+        val_ds.iter_over_batches(BATCH_SIZE),
+        desc="evaluating model on validation split.",
+        total=len(val_loader),
+    )
     with torch.no_grad():
-        for x in tqdm(val_loader, desc="evaluating model on validation split."):
+        for x in batch_it:
             start_time = time()
             x = x.to(device)
+            # if prev_batch is not None and prev_batch.shape[0] == x.shape[0]:
+            #     equality = (prev_batch == x).all(dim=1)
+            #     print(
+            #         "n identical samples:",
+            #         equality.sum().item(),
+            #         ", n samples per batch:",
+            #         prev_batch.shape[0],
+            #         "equality shape:",
+            #         equality.shape,
+            #     )
+            # prev_batch = x
             time_to_move_to_device += time() - start_time
             batch_weight = x.shape[0] / len(val_loader.dataset)
             with autocast_ctx():
@@ -189,9 +300,9 @@ def eval_model(sae: nn.Module, step: int):
             l1_loss += latents.abs().mean().item() * batch_weight
             l0_loss += (latents > 0).float().mean().item() * batch_weight
             reconstruction_loss += mse_loss(recons, x).item() * batch_weight
-    global time_to_load_shards
-    print("time to load shards:", time_to_load_shards, "time_to_move_to_device:", time_to_move_to_device)
-    time_to_load_shards = 0
+    global time_to_getitem
+    print("time to load shards:", time_to_getitem, "time_to_move_to_device:", time_to_move_to_device)
+    time_to_getitem = 0
     wandb.log(
         data={
             "validation/l1_loss": l1_loss,
