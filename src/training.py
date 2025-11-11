@@ -147,13 +147,13 @@ def train_sae(sae: nn.Module):
     time_to_move_to_device = 0
     for _ in range(1, SAE_EPOCHS + 1):
         sae.train()
-        for (xb, ) in tqdm(train_loader):
+        for x in tqdm(train_loader):
             start_time = time()
-            xb = xb.to(device)
+            x = x.to(device)
             time_to_move_to_device += time() - start_time
             with autocast_ctx():
-                _, latents, recons = sae(xb)
-                reconstruction_loss = mse_loss(recons, xb)
+                _, latents, recons = sae(x)
+                reconstruction_loss = mse_loss(recons, x)
                 l0_loss = (latents > 0).float().mean()
                 l1_loss = latents.abs().mean()
                 loss = reconstruction_loss #+ LAMBDA_L1 * l1_loss
