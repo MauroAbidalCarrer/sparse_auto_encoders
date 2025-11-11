@@ -10,12 +10,10 @@ warnings.filterwarnings("ignore")
 
 import wandb
 import torch
-import numpy as np
 from torch import nn
 from torch.utils.data import (
     DataLoader,
     Dataset,
-    random_split,
     SequentialSampler,
 )
 
@@ -54,7 +52,7 @@ BATCH_SIZE = int(2 ** 14)
 print("batch size:", BATCH_SIZE)
 LR = 1e-4
 WEIGHT_DECAY = 1e-5
-SAE_EPOCHS = 64
+SAE_EPOCHS = 1
 LAMBDA_L1 = 1e-4          # coefficient for L1 on latent
 # -------- Utility: load activations and labels --------
 N_ACTIVATIONS_DIMS = 1024
@@ -145,11 +143,14 @@ wandb.init(
 
 def train_sae(sae: nn.Module):
     step = 0
-    eval_model(sae, step)
+    # eval_model(sae, step)
+    time_to_move_to_device = 0
     for _ in range(1, SAE_EPOCHS + 1):
         sae.train()
         for (xb, ) in tqdm(train_loader):
+            start_time = time()
             xb = xb.to(device)
+            time_to_move_to_device += time() - start_time
             with autocast_ctx():
                 _, latents, recons = sae(xb)
                 reconstruction_loss = mse_loss(recons, xb)
@@ -170,6 +171,10 @@ def train_sae(sae: nn.Module):
                 commit=step % LOG_COMMIT_FREQ == 0,
             )
             step += 1
+        global time_to_load_shards
+        print("time to load shards:", time_to_load_shards, "time_to_move_to_device:", time_to_move_to_device)
+        time_to_load_shards = 0
+
         eval_model(sae, step)
 
 def eval_model(sae: nn.Module, step: int):
