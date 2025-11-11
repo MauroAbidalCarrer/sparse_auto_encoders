@@ -63,30 +63,25 @@ class ResidualActivationsDataset(Dataset):
     def __init__(self, paths_to_shards: str):
         super().__init__()
         self.paths_to_shards = paths_to_shards
-        self.shard_lengths = []
-        shard_len = torch.load(paths_to_shards[0], weights_only=True).shape[0]
-        print("shard_len:", shard_len)
-        self.shard_lengths = [shard_len] * len(paths_to_shards)
-        self.length = sum(self.shard_lengths)
-        self.current_shard_index = None
+        self.current_shard = torch.load(paths_to_shards[0], weights_only=True)
+        self.shards_len = self.current_shard.shape[0]
+        print("self.shards_len:", self.shards_len)
+        self.length = self.shards_len * len(paths_to_shards)
+        self.current_shard_index = 0        
 
     def __len__(self):
         return self.length
 
     def __getitem__(self, index: int):
+        shard_i = index // self.shards_len        
         global time_to_load_shards
         start_time = time()
-        total_shard_length = 0
-        shard_it = enumerate(zip(self.paths_to_shards, self.shard_lengths))
-        for shard_i, (file_path, shard_len) in shard_it:
-            if total_shard_length + shard_len > index:
-                if self.current_shard_index is None or shard_i != self.current_shard_index:
-                    self.current_shard = torch.load(file_path, weights_only=True)
-                    self.current_shard_index = shard_i
-                time_to_load_shards += time() - start_time
-                return self.current_shard[index - total_shard_length]
-            total_shard_length += shard_len
-        raise IndexError(f"Index {index} is out of range {self.length}")
+        if self.current_shard_index != shard_i:
+            file_path = self.paths_to_shards[shard_i]
+            self.current_shard = torch.load(file_path, weights_only=True)
+            self.current_shard_index = shard_i
+        time_to_load_shards += time() - start_time
+        return self.current_shard[index - shard_i * self.shards_len]
 
 train_ds = ResidualActivationsDataset([
     "dataset/residual_activations_shard_001.npy",
@@ -143,7 +138,7 @@ wandb.init(
 
 def train_sae(sae: nn.Module):
     step = 0
-    # eval_model(sae, step)
+    eval_model(sae, step)
     time_to_move_to_device = 0
     for _ in range(1, SAE_EPOCHS + 1):
         sae.train()
