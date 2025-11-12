@@ -196,22 +196,21 @@ class ResidualStreamRecorder:
                     self.save_shard(batch_i // self.dataset_shard_recording_freq)
 
     def save_shard(self, shard_index: int):
-        def _save_worker(shard: np.ndarray, index: int):
+        def _save_worker(shard: Tensor, index: int):
             print("Starting to save npy shard")
             start_time = time()
-            activations_path = os.path.join(self.output_dir, f"residual_activations_shard_{index:03d}.npy")
-            np.save(activations_path, shard, allow_pickle=False)
+            activations_path = os.path.join(self.output_dir, f"residual_activations_shard_{index:03d}.pt")
+            torch.save(shard, activations_path)
             print(
                 f"[Async save] shard {index} | shape: {shard.shape} | "
                 f"saved to: {activations_path} | time: {time() - start_time:.2f}s"
             )
             torch.cuda.empty_cache()
-        npy_shard_buff = (
+        shard_buff = (
             self.shard_buffer
             .reshape(-1, self.shard_buffer.shape[-1])
-            .numpy()
         )
-        thread = threading.Thread(target=_save_worker, args=(npy_shard_buff, shard_index), daemon=True)
+        thread = threading.Thread(target=_save_worker, args=(shard_buff, shard_index), daemon=True)
         thread.start()
         self.next_index_to_store_at = 0
 
