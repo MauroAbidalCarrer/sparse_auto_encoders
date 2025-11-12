@@ -1,5 +1,5 @@
 - Better understand the OpenAI paper:
-    - L(N) and L(c) 
+    - L(N) and L(c)
     - N2G: Seems a bit comlicated it would take a long time to understand it so I will try to ignore it for now.
     - metrics:
         - Downstrean loss: Difference (KL divergence or cross entropy) between tokens logits emitted from reconstructed residual stream through remaining layers.
@@ -51,11 +51,10 @@
         scale latent by the norm dim=-1 of the decoder idk why by I assume this is to avoid the L1 loss (on the latent) hacking
     - if rescale_acts_by_decoder_norm:
         divide latent by the norm dim=-1 of the decoder I guess this is to compensate for the previous scaling (you scale to prevent the L1 loss on the latent)
-    - affine transform of the decoder 
+    - affine transform of the decoder
     - apply oposite layer norm transform
 
     - rescale_acts_by_decoder_norm mode makes the sae act as if it has unit normed decoder columns (according to chatGPT):
-        - 
 
 - sparsify implementation:
     - residual activation mean bias substraction
@@ -76,23 +75,26 @@
         - Add more general dataset with, ideally, labeled questions.
     - architecture
         - Build on top of GPT-2
-        - Increase latent size, k
-        - Use activations in later layers like the ~15th (out of 20) layer for 7B unscensored model, layer 6(?) of GPT-2.
+        - Increase latent size, k (done)
+        - Use activations in later layers like the ~15th (out of 20) layer for 7B unscensored model, layer 6(?) of GPT-2. (done)
         - decoder normalization
+    - preprocessing:
+        - Remove mean of the inputs
+        - Use context length of 64
+        - unit norm them
     - evaluation:
         - Use downstream loss
-        - Use normalized MSE
+        - Use normalized MSE (done)
         - Still use L1 loss?
         - Auxiliary loss
     - model optimization
-        - Use gradient clipping 
-        - Increase batch size to maximize GPU efficiency
+        - Use gradient clipping
+        - Increase batch size to maximize GPU efficiency (done)
     - processing optimization:
         - Use sparse/dense matmul kernels
 
 next steps:
-- Use GPT-2 (done)
-- Improve dataset (done)
-- Use OpenAI SAE architecture (done)
-    - Match latent size and k
-- Use same losses
+- Improve loss metrics:
+    - Normalize mse
+    - Add L1 back in
+    - Add auxiliary loss
