@@ -149,22 +149,22 @@ class ShardedDataset(Dataset):
 
 train_ds = ShardedDataset(
     paths_to_shards=[
-        "dataset/residual_activations_shard_001.npy",
-        "dataset/residual_activations_shard_002.npy",
-        "dataset/residual_activations_shard_003.npy",
-        "dataset/residual_activations_shard_004.npy",
-        "dataset/residual_activations_shard_005.npy",
-        "dataset/residual_activations_shard_006.npy",
-        "dataset/residual_activations_shard_007.npy",
-        "dataset/residual_activations_shard_008.npy",
+        "dataset/residual_activations_shard_001.pt",
+        "dataset/residual_activations_shard_002.pt",
+        "dataset/residual_activations_shard_003.pt",
+        "dataset/residual_activations_shard_004.pt",
+        "dataset/residual_activations_shard_005.pt",
+        "dataset/residual_activations_shard_006.pt",
+        "dataset/residual_activations_shard_007.pt",
+        "dataset/residual_activations_shard_008.pt",
     ],
     batch_size=BATCH_SIZE,
 )
 val_ds = ShardedDataset(
     paths_to_shards=[
-        "dataset/residual_activations_shard_009.npy",
-        "dataset/residual_activations_shard_010.npy",
-        "dataset/residual_activations_shard_011.npy",
+        "dataset/residual_activations_shard_009.pt",
+        "dataset/residual_activations_shard_010.pt",
+        "dataset/residual_activations_shard_011.pt",
     ],
     batch_size=BATCH_SIZE,
 )
