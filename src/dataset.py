@@ -56,7 +56,7 @@ def mk_dataset(
         .from_pretrained(
             model_id,
             device_map=device,
-            torch_dtype=torch.float16,
+            dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
         )
         .eval()
@@ -122,7 +122,7 @@ class ResidualStreamRecorder:
             (dataset_shard_recording_freq + 1) * batch_size,
             seq_len,
             model_config.hidden_size,
-            dtype=torch.float32,
+            dtype=torch.bfloat16,
         )
         self.next_index_to_store_at = 0
 
@@ -197,18 +197,17 @@ class ResidualStreamRecorder:
 
     def save_shard(self, shard_index: int):
         def _save_worker(shard: Tensor, index: int):
-            print("Starting to save npy shard")
+            print("Starting to save shard", index)
             start_time = time()
             activations_path = os.path.join(self.output_dir, f"residual_activations_shard_{index:03d}.pt")
             torch.save(shard, activations_path)
-            print(
-                f"[Async save] shard {index} | shape: {shard.shape} | "
-                f"saved to: {activations_path} | time: {time() - start_time:.2f}s"
-            )
+            print(f"Saved shard {index} of shape {shard.shape} to {activations_path} in {time() - start_time:.2f}seconds.")
             torch.cuda.empty_cache()
         shard_buff = (
             self.shard_buffer
             .reshape(-1, self.shard_buffer.shape[-1])
+            .to(device="cpu", dtype=torch.bfloat16)
+            .clone()
         )
         thread = threading.Thread(target=_save_worker, args=(shard_buff, shard_index), daemon=True)
         thread.start()
