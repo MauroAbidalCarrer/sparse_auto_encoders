@@ -18,6 +18,9 @@
         - use sae bench to evaluate the sae
             - Understand the sae bench metrics:
                 - read the paper (-_-)
+            - integrate sae bench into my repo
+                - use pythia-70M-deduped to compare with the other solutions
+            - upload my socres?
     - architecture:
         - "We scale decoder latent directions to be unit norm at initialization (and also after each training step)" open ai paper A.1 Initialization
         - rescale_acts_by_decoder_norm from SAE lens SAETraining class
@@ -59,7 +62,6 @@
         divide latent by the norm dim=-1 of the decoder I guess this is to compensate for the previous scaling (you scale to prevent the L1 loss on the latent)
     - affine transform of the decoder
     - apply oposite layer norm transform
-
     - rescale_acts_by_decoder_norm mode makes the sae act as if it has unit normed decoder columns (according to chatGPT):
 
 - sparsify implementation:
