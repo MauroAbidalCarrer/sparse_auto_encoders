@@ -55,12 +55,11 @@ print("batch size:", BATCH_SIZE)
 LR = 1e-4
 WEIGHT_DECAY = 1e-5
 SAE_EPOCHS = 1
-LAMBDA_L1 = 1e-4          # coefficient for L1 on latent
+LAMBDA_L1 = 0.1          # coefficient for L1 on latent
 # -------- Utility: load activations and labels --------
 N_ACTIVATIONS_DIMS = 1024
 
 # -------- Create dataset and splits --------
-time_to_getitem = 0
 class ShardedDataset(Dataset):
     def __init__(self, paths_to_shards: list[str], batch_size: int, device: str="cpu"):
         super().__init__()
@@ -79,15 +78,11 @@ class ShardedDataset(Dataset):
         return self.length
 
     def __getitem__(self, index: int):
-        start_time = time()
-        global time_to_getitem
         shard_i = index // self.shards_len
         shard_local_i = index % self.shards_len
         # Switch shards if needed
         if self.current_shard_index != shard_i:
             self._switch_to_next_shard()
-            print(f"Switched to shard {self.current_shard_index} in {time() - start_time:.2f}s")
-        time_to_getitem += time() - start_time
         return self.current_shard[shard_local_i]
 
     def iter_over_batches(self, batch_size: int) -> Generator[Tensor]:
@@ -142,6 +137,10 @@ class ShardedDataset(Dataset):
     def next_shard_index(self) -> int:
         return (self.current_shard_index + 1) % self.n_shards
 
+    def n_batches(self, batch_size: int) -> int:
+        remainder_batch = 1 if self.length % batch_size != 0 else 0
+        return self.length // batch_size + remainder_batch
+
     def _load_shard(self, shard_index: int):
         """Background loader for a shard."""
         file_path = self.paths_to_shards[shard_index]
@@ -176,8 +175,6 @@ def mk_data_loader(dataset: Dataset) -> DataLoader:
         sampler=SequentialSampler(dataset),
     )
 
-train_loader = mk_data_loader(train_ds)
-val_loader = mk_data_loader(val_ds)
 
 EXPANSION_RATIO = 16
 N_LATENTS = N_ACTIVATIONS_DIMS * EXPANSION_RATIO
@@ -193,7 +190,6 @@ sae = SparseAutoencoder(
 sae = sae.to(device)
 # sae = torch.compile(sae)
 optimizer = torch.optim.AdamW(sae.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-mse_loss = nn.MSELoss(reduction="mean")
 
 # Weights and Biases
 LOG_COMMIT_FREQ = 100
@@ -212,40 +208,24 @@ wandb.init(
     }
 )
 
-def train_sae(sae: nn.Module):
+def train_sae(sae: nn.Module, train_ds: ShardedDataset, val_ds: ShardedDataset, batch_size: int):
     step = 0
-    eval_model(sae, step)
-    time_to_move_to_device = 0
-    prev_batch = None
+    eval_model(sae, step, val_ds, batch_size)
     for _ in range(1, SAE_EPOCHS + 1):
         sae.train()
         batch_it = tqdm(
-            train_ds.iter_over_batches(batch_size=BATCH_SIZE),
+            train_ds.iter_over_batches(batch_size=batch_size),
             desc="Training model",
-            total=len(train_loader),
+            total=train_ds.n_batches(batch_size),
         )
         for x in batch_it:
-            start_time = time()
             x = x.to(device)
-            if prev_batch is not None and prev_batch.shape[0] == x.shape[0]:
-                equality = (prev_batch == x).all(dim=1)
-                # print(
-                #     "n identical samples:",
-                #     equality.sum().item(),
-                #     ", n samples per batch:",
-                #     prev_batch.shape[0],
-                #     "equality shape:",
-                #     equality.shape,
-                # )
-            prev_batch = x
-
-            time_to_move_to_device += time() - start_time
             with autocast_ctx():
                 _, latents, recons = sae(x)
-                reconstruction_loss = mse_loss(recons, x)
+                reconstruction_loss = normalized_mse(recons, x)
                 l0_loss = (latents > 0).float().mean()
                 l1_loss = latents.abs().mean()
-                loss = reconstruction_loss #+ LAMBDA_L1 * l1_loss
+                loss = reconstruction_loss + LAMBDA_L1 * l1_loss
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -260,49 +240,28 @@ def train_sae(sae: nn.Module):
                 commit=step % LOG_COMMIT_FREQ == 0,
             )
             step += 1
-        global time_to_getitem
-        print("time to load shards:", time_to_getitem, "time_to_move_to_device:", time_to_move_to_device)
-        time_to_getitem = 0
 
-        eval_model(sae, step)
+        eval_model(sae, step, val_ds, batch_size)
 
-def eval_model(sae: nn.Module, step: int):
+def eval_model(sae: nn.Module, step: int, val_ds: ShardedDataset, batch_size: int):
     sae.eval()
     l0_loss = 0
     l1_loss = 0
     reconstruction_loss = 0
-    prev_batch = None
-    time_to_move_to_device = 0
     batch_it = tqdm(
-        val_ds.iter_over_batches(BATCH_SIZE),
+        val_ds.iter_over_batches(batch_size),
         desc="evaluating model on validation split.",
-        total=len(val_loader),
+        total=val_ds.n_batches(batch_size),
     )
     with torch.no_grad():
         for x in batch_it:
-            start_time = time()
             x = x.to(device)
-            # if prev_batch is not None and prev_batch.shape[0] == x.shape[0]:
-            #     equality = (prev_batch == x).all(dim=1)
-            #     print(
-            #         "n identical samples:",
-            #         equality.sum().item(),
-            #         ", n samples per batch:",
-            #         prev_batch.shape[0],
-            #         "equality shape:",
-            #         equality.shape,
-            #     )
-            # prev_batch = x
-            time_to_move_to_device += time() - start_time
-            batch_weight = x.shape[0] / len(val_loader.dataset)
+            batch_weight = x.shape[0] / val_ds.length
             with autocast_ctx():
                 _, latents, recons = sae(x)
             l1_loss += latents.abs().mean().item() * batch_weight
             l0_loss += (latents > 0).float().mean().item() * batch_weight
-            reconstruction_loss += mse_loss(recons, x).item() * batch_weight
-    global time_to_getitem
-    print("time to load shards:", time_to_getitem, "time_to_move_to_device:", time_to_move_to_device)
-    time_to_getitem = 0
+            reconstruction_loss += normalized_mse(recons, x).item() * batch_weight
     wandb.log(
         data={
             "validation/l1_loss": l1_loss,
@@ -313,5 +272,12 @@ def eval_model(sae: nn.Module, step: int):
         step=step
     )
 
+def normalized_mse(recons: Tensor, x: Tensor) -> Tensor:
+    # From OpenAI's SAEs repo
+    x_norm = (x ** 2).mean(dim=1)
+    mse = ((x - recons) ** 2).mean(dim=1)
+    normed_mse = mse / x_norm
+    return normed_mse.mean()
+
 if __name__ == "__main__":
-    train_sae(sae)
+    train_sae(sae, train_ds, val_ds, BATCH_SIZE)
