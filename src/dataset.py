@@ -14,7 +14,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from transformers import AutoConfig, AutoModelForCausalLM
 
 
-BATCH_SIZE = 200
+BATCH_SIZE = 100
 MODEL_ID = "roneneldan/TinyStories-1Layer-21M"
 INPUT_DATASETS_CFGS = [
     {
@@ -27,7 +27,7 @@ CONTEXT_WINDOW = 512
 LAYER_IDX_FRACTION = 3 / 4
 RESID_ACT_DATASET_PATH = "dataset"
 N_ACTIVATIONS_TO_RECORD = 4096 * 30_000
-DATASET_SHARD_CACHING_FREQ = 100
+DATASET_SHARD_CACHING_FREQ = 200
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Made specifically for Tiny stories for now, will most likely require modifications to work on most HF datasets.
