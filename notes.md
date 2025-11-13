@@ -41,6 +41,9 @@
     - model optimization:
         - decoder columns unit normalazation
         - parallel gradient to decoder removal?
+    - make SAE on top of deepseek-r1
+        - get the sae bench score of goodfire's sae
+        - reach goodfire's scores?
 
 - TopK SAELens forward implementation:
     - Activation norm scaling: divide by mean of training set
