@@ -16,6 +16,8 @@
         - Auxiliary loss
         - Loss normalization (done)
         - use sae bench to evaluate the sae
+            - Understand the sae bench metrics:
+                - read the paper (-_-)
     - architecture:
         - "We scale decoder latent directions to be unit norm at initialization (and also after each training step)" open ai paper A.1 Initialization
         - rescale_acts_by_decoder_norm from SAE lens SAETraining class
