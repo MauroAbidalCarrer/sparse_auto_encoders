@@ -55,7 +55,7 @@ print("batch size:", BATCH_SIZE)
 LR = 1e-4
 WEIGHT_DECAY = 1e-5
 SAE_EPOCHS = 1
-LAMBDA_L1 = 1e-4          # coefficient for L1 on latent
+LAMBDA_L1 = 0.1          # coefficient for L1 on latent
 # -------- Utility: load activations and labels --------
 N_ACTIVATIONS_DIMS = 1024
 
@@ -225,7 +225,7 @@ def train_sae(sae: nn.Module, train_ds: ShardedDataset, val_ds: ShardedDataset, 
                 reconstruction_loss = normalized_mse(recons, x)
                 l0_loss = (latents > 0).float().mean()
                 l1_loss = latents.abs().mean()
-                loss = reconstruction_loss #+ LAMBDA_L1 * l1_loss
+                loss = reconstruction_loss + LAMBDA_L1 * l1_loss
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
