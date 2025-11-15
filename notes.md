@@ -17,7 +17,16 @@
         - Loss normalization (done)
         - use sae bench to evaluate the sae
             - Understand the sae bench metrics:
-                - read the paper (-_-)
+                - read the paper (-_-) (done)
+            - Fix sae-bench (that was unexpected)
+                - Fix dependencies
+                    - run tests
+                    - Make PR
+                - fix code
+                    - Fix eval sae-lens ActivationStore instantiation by setting the context_size in the sae.cfg.metadata instead of passing it as an activation store  constructor parameter.
+                    - Add condition to matplotlib xscale "log" call in case there are already some positions or if there are no positive values
+                    - run tests
+                    - Make PR
             - integrate sae bench into my repo
                 - use pythia-70M-deduped to compare with the other solutions
             - upload my socres?
