@@ -44,11 +44,6 @@ if USE_BFLOAT16:
 else:
     autocast_ctx = nullcontext
 
-# -------- USER: paths to your data files --------
-# ACTIVATIONS_PATH = "dataset/middle_layer_activations.pt"  # shape: (N, seq_len, hidden_dim)
-OUT_DIR = "sae_output"
-os.makedirs(OUT_DIR, exist_ok=True)
-
 # -------- HYPERPARAMS --------
 BATCH_SIZE = int(2 ** 14)
 print("batch size:", BATCH_SIZE)
@@ -183,7 +178,7 @@ K = 256
 sae = SparseAutoencoder(
     n_inputs=N_ACTIVATIONS_DIMS,
     n_latents=N_LATENTS,
-    activation=TopK(256),
+    activation=TopK(K),
     tied=True,
     normalize=USE_NORMALIZATION,
 )

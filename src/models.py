@@ -70,13 +70,12 @@ class SparseAutoencoder(nn.Module):
         x, mu, std = LN(x)
         return x, dict(mu=mu, std=std)
 
-    def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, dict[str, Any]]:
+    def encode(self, preprocessed_x: torch.Tensor) -> torch.Tensor: #tuple[, dict[str, Any]]:
         """
         :param x: input data (shape: [batch, n_inputs])
         :return: autoencoder latents (shape: [batch, n_latents])
         """
-        x, info = self.preprocess(x)
-        return self.activation(self.encode_pre_act(x)), info
+        return self.activation(self.encode_pre_act(preprocessed_x))
 
     def decode(self, latents: torch.Tensor, info: dict[str, Any] | None = None) -> torch.Tensor:
         """
@@ -96,8 +95,8 @@ class SparseAutoencoder(nn.Module):
                   autoencoder latents (shape: [batch, n_latents])
                   reconstructed data (shape: [batch, n_inputs])
         """
-        x, info = self.preprocess(x)
-        latents_pre_act = self.encode_pre_act(x)
+        preprocessed_x, info = self.preprocess(x)
+        latents_pre_act = self.encode_pre_act(preprocessed_x)
         latents = self.activation(latents_pre_act)
         recons = self.decode(latents, info)
 
@@ -139,6 +138,8 @@ class SparseAutoencoder(nn.Module):
             sd[prefix + "activation_state_dict"] = self.activation.state_dict()
         return sd
 
+    def fold_W_dec_norm(self):
+        print("-----------------------------fold_W_dec_norm no implemented, passing-----------------")
 
 class TiedTranspose(nn.Module):
     def __init__(self, linear: nn.Linear):

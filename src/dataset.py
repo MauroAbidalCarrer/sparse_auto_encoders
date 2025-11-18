@@ -15,7 +15,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 
 BATCH_SIZE = 100
-MODEL_ID = "roneneldan/TinyStories-1Layer-21M"
+MODEL_ID = "EleutherAI/pythia-70m-deduped"
 INPUT_DATASETS_CFGS = [
     {
         "id": "apollo-research/roneneldan-TinyStories-tokenizer-gpt2",
@@ -62,6 +62,8 @@ def mk_dataset(
         .eval()
     )
     model_config = AutoConfig.from_pretrained(model_id)
+    print("model embeding size:", model_config.hidden_size)
+    exit()
     # record residual activations
     input_dataset = load_datasets_as_df(datasets_cfgs)
     recorder = ResidualStreamRecorder(
