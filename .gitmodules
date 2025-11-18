@@ -1,0 +1,4 @@
+[submodule "src/SAEBench"]
+	path = src/SAEBench
+	url = git@github.com:MauroAbidalCarrer/SAEBench.git
+	branch = fix_dependencies
