@@ -28,8 +28,12 @@
                     - run tests
                     - Make PR
             - integrate sae bench into my repo
+                - Get a score wit tiny stories sae
                 - use pythia-70M-deduped to compare with the other solutions
-            - upload my socres?
+                - use multiple k values
+            - Reach some score
+                - ideally reach the same score as goddfire's sae for deep seek R1 (that would be a banger)
+            - upload my scores?
     - architecture:
         - "We scale decoder latent directions to be unit norm at initialization (and also after each training step)" open ai paper A.1 Initialization
         - rescale_acts_by_decoder_norm from SAE lens SAETraining class
