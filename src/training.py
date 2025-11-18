@@ -281,3 +281,5 @@ def normalized_mse(recons: Tensor, x: Tensor) -> Tensor:
 
 if __name__ == "__main__":
     train_sae(sae, train_ds, val_ds, BATCH_SIZE)
+    os.makedirs("models", exist_ok=True)
+    torch.save(sae.sate_dict(), "models/sae.pt")
