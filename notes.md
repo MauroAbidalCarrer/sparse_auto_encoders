@@ -22,13 +22,16 @@
                 - Fix dependencies
                     - run tests
                     - Make PR
+                    - Remove constraints.txt?
                 - fix code
                     - Fix eval sae-lens ActivationStore instantiation by setting the context_size in the sae.cfg.metadata instead of passing it as an activation store  constructor parameter.
                     - Add condition to matplotlib xscale "log" call in case there are already some positions or if there are no positive values
                     - run tests
                     - Make PR
             - integrate sae bench into my repo
-                - Get a score wit tiny stories sae
+                - Use SAELens model
+                - Get a score with it
+                - Make custom sae that inherits from base sae lens
                 - use pythia-70M-deduped to compare with the other solutions
                 - use multiple k values
             - Reach some score
